@@ -73,18 +73,21 @@ make marker                                  # docs/marker_10cm.pdf, reference f
 
 ## How it works (short)
 
-`select → analyze → register → read → resolve → measure → items → room → price → assemble`. Each stage is
-a function that writes `stages/<name>.json` and can be re-run alone. Details in
-[docs/architecture.md](docs/architecture.md).
+`select → analyze → register → read → resolve → dedupe → verify → measure → items → room → price → assemble`.
+Each stage writes `stages/<name>.json` and can be re-run alone; `sweeps/<id>/debug.log` records every
+decision. Details in [docs/architecture.md](docs/architecture.md).
 
-- **Count**: FastSAM segments every spine and YOLO11 says where the books are. Spines are matched across
-  frames through homographies of the shelf plane, so each book is counted once.
-- **Read**: Apple Vision OCR on every frame; text is split per spine and voted across frames. No language
-  model reads titles.
-- **Identify**: Open Library and Google Books are searched with the spine text. A match is scored only by
-  words actually on the spine. Below threshold, the book is `unidentified` with its dimensions.
-- **Measure**: ARCore metric depth and pose (WebXR). Without AR: an ArUco reference marker, a shelf width
-  stated by voice, or catalogue book heights. The room comes from the ARCore depth point cloud.
+- **Sweep**: the agent confirms country and currency, then directs one continuous walk: the shelves, then the
+  walls, floor and items in the same pass, ended with "I'm done". It says what it logs, asks to slow down or
+  step closer, and asks whether art is a print. During the walk no language model speaks or records facts;
+  corrections ("skip that shelf", "it's a print") are recorded by rule.
+- **Count**: FastSAM + YOLO11 find spines; spines are tracked across frames, and `dedupe` merges repeat
+  sightings (revisits, split detections) with guards for set volumes and books side by side.
+- **Read and identify**: Apple Vision OCR; Open Library and Google Books searched with the spine text, scored
+  only by words on the spine; books about a book are rejected; `verify` confirms the authors in the second
+  catalogue. Below threshold, the book is `unidentified` with its dimensions.
+- **Measure**: catalogue heights of identified books are rulers in the same picture and shelf row. AR depth is
+  used when the phone's AR tracks reliably (check with `web/artest.html`). The room needs AR depth.
 - **Price**: retrieved offers only, with source, URL, date and condition. Rare, signed, first-edition and
   above-threshold lines and art are never auto-priced. Totals are summed in code.
 
@@ -112,30 +115,31 @@ assistant.
 
 ## Assumptions (where the brief is ambiguous)
 
-- Capture is WebXR on Android Chrome (ARCore pose, depth and camera image in one session). Other devices
-  fall back to camera-only: books are measured from the reference marker, a voice-stated shelf width or
-  catalogue heights, and the room is reported as not measured.
-- Book count includes books seen only cut off at a frame edge, flagged in review. Books standing behind
-  others are invisible and not counted.
-- Edition and ISBN are filled only when the spine shows the publisher of a catalogued edition.
+- **Test space**: 10 books on one shelf and 18 non-book items in one room (the brief asks for at least 60 books
+  on 2 shelving units; only 10 books were available). Ground-truth samples are therefore 10 measured spines
+  and 8 hand-checked prices instead of 20 and 15. Numbers are reported on this space only.
+- Capture is a camera sweep on Android Chrome (full 4:3 sensor, 1 frame per 0.9 s). WebXR AR is opt-in
+  (`/?ar=1`); without trusted AR the room is reported as not measured.
+- Book count includes books seen whole at least once. Fragments only ever cut by the picture's edge, and
+  one-frame glimpses outside the shelf row, are not counted (listed in `stages/dedupe.json`).
+- Edition and ISBN are filled only when the spine shows the publisher of a catalogued edition; otherwise the
+  common edition is priced (a reason prices can differ from a specific edition's).
 - Replacement = median of the main price band of new offers in the policyholder's country, from established
-  booksellers when at least two list the book (general marketplaces also carry cheap unlicensed prints);
-  box sets, study notes, translations sold under the same title and collectors' copies are excluded. Used = median of at least two
-  second-hand marketplace offers, condition "good", never above the new price; local offers first, else US
-  offers converted and labelled. Blank (and in review) when neither exists.
+  booksellers when at least two list the book; box sets, study notes, translations and collectors' copies are
+  excluded. Used = median of at least two second-hand offers, never above the new price; else US offers
+  converted and labelled. Blank (and in review) when neither exists.
 - Appraisal threshold: 150 USD equivalent in local currency, configurable.
-- Wall area = perimeter × ceiling height; doors and windows are not subtracted. Shelved wall area = front
-  area of detected shelving units.
-- Item status `unpriced` was added to the contract's statuses for items with too few comparable offers.
-- Plan deviations: an ArUco marker replaces the credit card (detection on a card was unreliable next to book
-  covers of the same aspect ratio); FastSAM + YOLO replaces Hough-line spine splitting (measured better on
-  real photos); OCR-first reading replaces VLM reading (a VLM grounding pass took 203 s per frame).
+- Wall area = perimeter × ceiling height; doors and windows are not subtracted.
+- Item status `unpriced` was added for items with too few comparable offers or that could not be recognised.
 
 ## Limitations (honest)
 
-- On the test phone (OnePlus CPH2745) ARCore depth is unusable (37 m read at 1 m), so the room is reported
-  "not measured" and books are measured from catalogue heights. A phone whose AR depth passes a 1 m wall check
-  is needed for room areas. See the failure log.
-- Titles come from public catalogues; books missing from Open Library and Google Books stay unidentified
-  (6 of 35 in the test set).
-- Thin spines (under 2 cm) carry about ±0.4 cm thickness error; italic script titles are often not read.
+- Room areas need AR depth. Early AR sweeps on the test phone read impossible depths (16-37 m at 1 m); it is
+  not yet proven whether the phone or our depth handling was at fault (`web/artest.html` checks it), so the
+  room is reported as not measured in camera sweeps.
+- Very thin neighbouring spines can be detected as one (two 1 cm books counted once); spine thickness is
+  overestimated where masks bleed into neighbours.
+- Items seen only in passing are named from partial crops and can be misnamed (an iron called a hand
+  mixer); unrecognised objects are left unpriced.
+- Prices are for the common edition unless the spine names the edition.
+- Titles come from public catalogues; books missing from Open Library and Google Books stay unidentified.
