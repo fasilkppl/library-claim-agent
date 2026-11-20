@@ -1,0 +1,498 @@
+"""Turn retrieved offers into the two book figures and the item range.
+
+Rules (from the brief):
+- every figure carries source, URL, retrieval time and the condition assumed;
+- a local price is preferred; otherwise another market's price is converted and labelled converted;
+- no price at all -> amount None, excluded from totals;
+- art, signed, rare and above-threshold lines are never auto-priced (handled by the caller).
+"""
+
+from __future__ import annotations
+
+import re
+import statistics
+from dataclasses import dataclass, field
+from typing import Any
+
+from rapidfuzz import fuzz
+
+from claimagent.pipeline.price.sources import (
+    COUNTRY_CURRENCY,
+    USED_BOOK_SELLERS,
+    EbayBrowse,
+    Frankfurter,
+    GoogleBooksSale,
+    Offer,
+    SerpApiShopping,
+    SerperShopping,
+)
+from claimagent.pipeline.resolve import content_tokens
+
+FORMAT_WORDS = {
+    "paperback",
+    "hardcover",
+    "hardback",
+    "softcover",
+    "edition",
+    "reprint",
+    "english",
+    "german",
+    "hindi",
+    "international",
+    "indian",
+    "binding",
+    "unabridged",
+    "illustrated",
+}
+NOISE = (
+    "kindle",
+    "ebook",
+    "e-book",
+    "audiobook",
+    "audio cd",
+    "summary of",
+    "study guide",
+    "poster",
+    "bookmark",
+    "t-shirt",
+    "mug",
+    "sticker",
+    "notebook",
+    "box set",
+    "set of",
+    "bundle",
+    "lot of",
+    "combo",
+    "collection",
+    "books set",
+    "book set",
+    "series set",
+    " books!",
+    "large print",
+    "signed",
+    "signiert",
+    "first edition",
+    "1st edition",
+    "antiquarian",
+    "rare book",
+    "unauthorized",
+    "deciphering",
+    "secrets of",
+    "analysis of",
+    "companion",
+    "audiobook",
+    "audio cd",
+    "cd-audio",
+    "[cd",
+    " cd ",
+    "mp3",
+    "brief read",
+    "analysis",
+    "teacher's guide",
+    "lesson",
+    "reviewed",
+    "study of",
+    "approach to",
+    "critical",
+    "notes by",
+    "guide to",
+    "summary",
+    " + ",
+)
+# Replacement = a new copy from an established bookseller. General marketplaces also carry cheap
+# unlicensed prints, so their offers count only when no established seller lists the book.
+ESTABLISHED_SELLERS = (
+    "amazon",
+    "flipkart",
+    "crossword",
+    "bookswagon",
+    "sapna",
+    "atlantic",
+    "odyssey",
+    "kitabay",
+    "barnes",
+    "books-a-million",
+    "booksamillion",
+    "bookshop.org",
+    "powell",
+    "target",
+    "walmart",
+    "waterstones",
+    "blackwell",
+    "whsmith",
+    "thalia",
+    "hugendubel",
+)
+
+
+def established(offers: list[Offer]) -> tuple[list[Offer], bool]:
+    """Offers from established booksellers when at least two exist, else all (flag False)."""
+    est = [o for o in offers if any(s in o.seller.lower() for s in ESTABLISHED_SELLERS)]
+    return (est, True) if len(est) >= 2 else (offers, False)
+
+
+# Translations sold under the original title name their language in the listing.
+OTHER_LANGUAGES = (
+    "hindi",
+    "tamil",
+    "telugu",
+    "marathi",
+    "bengali",
+    "kannada",
+    "malayalam",
+    "gujarati",
+    "urdu",
+    "farsi",
+    "persian",
+    "arabic",
+)  # European translations carry their own titles ("El Símbolo Perdido") and fail the title match anyway
+
+
+@dataclass
+class PriceFigure:
+    amount: float | None = None
+    low: float | None = None
+    high: float | None = None
+    currency: str = ""
+    source: str = ""
+    url: str = ""
+    retrieved_at: str = ""
+    converted: bool = False
+    converted_from: str = ""
+    fx_rate: float | None = None
+    fx_date: str = ""
+    condition_assumed: str = ""
+    offers_used: int = 0
+    query: str = ""
+    note: str = ""
+    offers: list[dict[str, Any]] = field(default_factory=list)
+
+
+def main_title(title: str, author: str = "") -> str:
+    """The title a shop lists a book under: without "by <author>" and without a subtitle. A catalogue record
+    can read "Go Set a Watchman by Harper Lee" or "Mahatma Gandhi: The Story of My Experiments with Truth"
+    (author first); a listing reads "Go Set a Watchman" or "The Story of My Experiments with Truth"."""
+    surnames = {toks[-1] for a in author.split(",") if (toks := content_tokens(a))}
+    t = title
+    m = re.search(r"\s+by\s+(.*)$", title, flags=re.I)
+    if m and surnames & set(content_tokens(m.group(1))):  # "... by Harper Lee", not "Step by Step"
+        t = title[: m.start()]
+    head, sep, rest = t.partition(":")
+    if sep and rest.strip():
+        head_toks = content_tokens(head)
+        # "Author: Title" -> the title; "Title: subtitle" -> the title
+        t = (
+            rest
+            if head_toks and set(head_toks) <= (surnames | {w for a in author.split(",") for w in content_tokens(a)})
+            else head
+        )
+    return t.strip()
+
+
+def _listing_parts(listing: str) -> list[str]:
+    """A listing title cut at its separators: "ReWork: Change the Way You Work Forever (Paperback)" ->
+    ["ReWork", "Change the Way You Work Forever", "Paperback"], each also without a trailing "by ..."."""
+    parts = re.split(r"[:|()\[\]\u2013\u2014]| - ", listing)
+    return [re.sub(r"\s+by\s+.*$", "", p, flags=re.I).strip() for p in parts if p.strip()]
+
+
+MAX_EXTRA_WORDS = 1  # descriptive words in the matching listing part beyond the main title (see DESCRIPTOR_WORDS)
+
+
+def _term(term: str) -> re.Pattern[str]:
+    """A list term matched as whole words ("mug" must not hit "smuggler", "lot of" not "pilot of")."""
+    t = term.strip()
+    left = r"\b" if t[:1].isalnum() else ""
+    right = r"\b" if t[-1:].isalnum() else ""
+    return re.compile(left + re.escape(t) + right)
+
+
+_NOISE_RE = [(n, _term(n)) for n in NOISE]
+# Copy condition in a marketplace listing ("Godel Escher Bach used - very good"): says nothing about the work.
+CONDITION_WORDS = {"used", "good", "very", "fair", "acceptable", "condition", "pre", "owned", "preowned", "like", "new"}
+# Extra words a shop adds to a title without it being another work ("Wings of Fire An Autobiography").
+DESCRIPTOR_WORDS = {
+    "novel",
+    "autobiography",
+    "memoir",
+    "memoirs",
+    "biography",
+    "classic",
+    "classics",
+    "edition",
+    "revised",
+    "updated",
+    "anniversary",
+    "complete",
+    "original",
+    "book",
+    "story",
+}
+
+
+def book_offer_matches(offer: Offer, title: str, author: str, isbn_query: bool = False) -> bool:
+    """The listing is this book on its own: its main title equals the book's main title (one descriptive word
+    such as "novel" extra at most), it is not a study, summary, audio edition, translation or a set of several
+    books. For an ISBN search the shop already matched the edition, so extra title words are allowed, but the
+    listing must still contain the whole main title and pass the same exclusions."""
+    t = offer.title.lower()
+    title_l = title.lower()
+    # A term that is part of the book's own title ("The Companion") does not exclude its listings.
+    if any(rx.search(t) and not rx.search(title_l) for _, rx in _NOISE_RE):
+        return False
+    if any(lang in t and lang not in title_l for lang in OTHER_LANGUAGES):
+        return False
+    if re.search(r"[^\x00-\u024f\u2000-\u206f\u20b9]", offer.title):
+        return False  # a listing title in another script (Bengali, Persian...) is another language edition
+    if len(re.findall(r"\bby\b", t)) >= 2:
+        return False  # "A by X and B by Y": two books sold together
+    author_toks = {w for a in author.split(",") for w in content_tokens(a)}
+    want = [w for w in content_tokens(main_title(title, author)) if w not in author_toks]
+    if not want:
+        return False
+    for part in _listing_parts(offer.title):
+        skip = (FORMAT_WORDS | CONDITION_WORDS | author_toks) - set(want)  # "Brave New World" keeps "new"
+        toks = [w for w in content_tokens(part) if w not in skip]
+        if not toks:
+            continue
+        hits = sum(1 for w in want if any(w == x or fuzz.ratio(w, x) >= 90 for x in toks))
+        extra = [x for x in toks if not any(x == w or fuzz.ratio(w, x) >= 90 for w in want)]
+        if hits < len(want):
+            continue
+        if isbn_query or (len(extra) <= MAX_EXTRA_WORDS and all(x in DESCRIPTOR_WORDS for x in extra)):
+            return True
+    return False
+
+
+CLUSTER_SPAN = 2.5  # the densest price band spans at most this factor (e.g. 200-500)
+
+
+def main_cluster(values: list[float]) -> list[float]:
+    """The densest band of prices: ordinary retail copies. Collector, import and mispriced listings scatter
+    far above it and must not move the replacement figure. Ties go to the cheaper band."""
+    vs = sorted(values)
+    best: list[float] = []
+    j = 0
+    for i, lo in enumerate(vs):
+        j = max(j, i)
+        while j + 1 < len(vs) and vs[j + 1] <= lo * CLUSTER_SPAN:
+            j += 1
+        if j - i + 1 > len(best):
+            best = vs[i : j + 1]
+    return best
+
+
+def robust_median(values: list[float]) -> tuple[float, list[float]]:
+    """Median of the main price band (see main_cluster)."""
+    if len(values) <= 2:
+        return statistics.median(values), values
+    kept = main_cluster(values)
+    return statistics.median(kept), kept
+
+
+def quantiles(values: list[float]) -> tuple[float, float]:
+    vs = sorted(values)
+    if len(vs) < 4:
+        return vs[0], vs[-1]
+    q = statistics.quantiles(vs, n=4)
+    return q[0], q[2]
+
+
+class PriceEngine:
+    def __init__(
+        self, serp: SerpApiShopping | SerperShopping, ebay: EbayBrowse, fx: Frankfurter, gbooks: GoogleBooksSale
+    ) -> None:
+        self.serp, self.ebay, self.fx, self.gbooks = serp, ebay, fx, gbooks
+
+    # ---------------------------------------------------------------- helpers
+    def _to_local(self, fig: PriceFigure, currency: str) -> PriceFigure:
+        if not fig.currency or fig.currency == currency or (fig.amount is None and fig.low is None):
+            return fig
+        r = self.fx.rate(fig.currency, currency)
+        if r is None:
+            fig.note = (fig.note + f"; no FX rate {fig.currency}->{currency}, excluded").strip("; ")
+            fig.amount = fig.low = fig.high = None
+            return fig
+        rate, date, _ = r
+        fig.converted, fig.converted_from, fig.fx_rate, fig.fx_date = True, fig.currency, rate, date
+        if fig.amount is not None:
+            fig.amount = round(fig.amount * rate, 2)
+        if fig.low is not None:
+            fig.low = round(fig.low * rate, 2)
+        if fig.high is not None:
+            fig.high = round(fig.high * rate, 2)
+        fig.currency = currency
+        return fig
+
+    @staticmethod
+    def _figure(offers: list[Offer], condition: str, query: str) -> PriceFigure:
+        amounts = [o.amount for o in offers]
+        med, kept = robust_median(amounts)
+        rep = min(offers, key=lambda o: abs(o.amount - med))  # the cited offer is the one closest to the median
+        lo, hi = quantiles(kept)
+        return PriceFigure(
+            amount=round(med, 2),
+            low=round(lo, 2),
+            high=round(hi, 2),
+            currency=rep.currency,
+            source=rep.source,
+            url=rep.url,
+            retrieved_at=rep.retrieved_at,
+            condition_assumed=condition,
+            offers_used=len(kept),
+            query=query,
+            offers=[
+                {"title": o.title[:90], "amount": o.amount, "currency": o.currency, "seller": o.seller, "url": o.url}
+                for o in offers[:8]
+            ],
+        )
+
+    def _used_shopping(
+        self, query: str, title: str, author: str, isbn: str, country: str, currency: str, cap: float | None
+    ) -> list[Offer]:
+        """Second-hand marketplace offers under the "used" filter, at or below the new price (collectible copies
+        priced above a new copy are not a used value). Needs at least two."""
+        offers = [
+            o
+            for o in self.serp.search(query, country, used=True)
+            if o.condition == "used"
+            and book_offer_matches(o, title, author, bool(isbn))
+            and o.currency in (currency, "")
+            and (cap is None or o.amount <= cap)
+        ]
+        return offers if len(offers) >= 2 else []
+
+    def _cap_in(self, cap_local: float | None, local: str, other: str) -> float | None:
+        if cap_local is None or local == other:
+            return cap_local
+        r = self.fx.rate(other, local)
+        return cap_local / r[0] if r else None
+
+    def _within_cap(self, o: Offer, cap_local: float | None, local: str) -> bool:
+        """The offer is at or below the local cap, compared in the offer's own currency. Unknown rate: dropped."""
+        if cap_local is None:
+            return True
+        c = self._cap_in(cap_local, local, o.currency or local)
+        return c is not None and o.amount <= c
+
+    # ---------------------------------------------------------------- books
+    def book(self, title: str, author: str, isbn: str, volume_id: str, country: str) -> tuple[PriceFigure, PriceFigure]:
+        new_fig, shop = self._book_new(title, author, isbn, volume_id, country)
+        used_fig = self._book_used(title, author, isbn, country, shop, new_fig)
+        return new_fig, used_fig
+
+    def _book_new(
+        self, title: str, author: str, isbn: str, volume_id: str, country: str
+    ) -> tuple[PriceFigure, list[Offer]]:
+        currency = COUNTRY_CURRENCY.get(country.upper(), "")
+        title_query = f"{main_title(title, author)} {author.split(',')[0]} book".strip()
+        # The ISBN finds the exact edition where shops index it; Google Shopping outside the US often ignores
+        # an ISBN and returns unrelated books, so the title search follows when the ISBN finds no copy.
+        queries = [isbn, title_query] if isbn else [title_query]
+        new_fig = PriceFigure(currency=currency, query=queries[0])
+        shop: list[Offer] = []
+        for query in queries:
+            found = [o for o in self.serp.search(query, country) if book_offer_matches(o, title, author, query == isbn)]
+            found = [o for o in found if o.currency == currency or not o.currency]
+            shop += found
+            # Rare-book marketplaces (Biblio, AbeBooks...) list collector and second-hand copies: not a new copy.
+            new_offers, from_established = established(
+                [o for o in found if o.condition == "new" and not USED_BOOK_SELLERS.search(o.seller)]
+            )
+            if new_offers:
+                new_fig = self._figure(new_offers, "new", query)
+                new_fig.currency = currency
+                if not from_established:
+                    new_fig.note = "no established bookseller lists it; median of all new offers"
+                break
+        # Other market: US Google Shopping, converted.
+        if new_fig.amount is None and country.upper() != "US" and self.serp.enabled:
+            for query in queries:
+                us = [
+                    o
+                    for o in self.serp.search(query, "US")
+                    if book_offer_matches(o, title, author, query == isbn)
+                    and o.condition == "new"
+                    and o.currency in ("USD", "")
+                ]
+                if us:
+                    fig = self._figure(us, "new", query)
+                    fig.currency = "USD"
+                    new_fig = self._to_local(fig, currency)
+                    new_fig.note = f"no local new offer in {country}; US price converted"
+                    break
+        if new_fig.amount is None:
+            eb = self.gbooks.price(volume_id, country)
+            if eb is not None:
+                fig = self._figure([eb], "new (ebook edition, closest equivalent found)", new_fig.query)
+                new_fig = self._to_local(fig, currency)
+                new_fig.note = "only an ebook list price was found; review whether a print copy is needed"
+        if new_fig.amount is None and not new_fig.note:
+            new_fig.note = "no price found from any configured source"
+        return new_fig, shop
+
+    def _book_used(
+        self, title: str, author: str, isbn: str, country: str, shop: list[Offer], new_fig: PriceFigure
+    ) -> PriceFigure:
+        currency = COUNTRY_CURRENCY.get(country.upper(), "")
+        query = new_fig.query
+        # Cap only against a print price; an ebook list price says nothing about a used print copy.
+        cap = new_fig.amount if new_fig.condition_assumed == "new" else None
+        used_fig = PriceFigure(currency=currency, query=query)
+        local = [o for o in shop if o.condition == "used" and (cap is None or o.amount <= cap)]
+        if len(local) < 2:
+            local = self._used_shopping(query, title, author, isbn, country, currency, cap)
+        if local:
+            used_fig = self._figure(local, "used (median of second-hand offers on Google Shopping)", query)
+            used_fig.currency = currency
+            return used_fig
+        if country.upper() != "US":
+            us_used = self._used_shopping(query, title, author, isbn, "US", "USD", self._cap_in(cap, currency, "USD"))
+            if us_used:
+                used_fig = self._to_local(
+                    self._figure(us_used, "used (median of second-hand marketplace offers, US)", query), currency
+                )
+                used_fig.note = f"too few second-hand offers in {country}; US second-hand offers converted"
+                return used_fig
+        ebay_offers, market = self.ebay.search_used(query, country)
+        ebay_offers = [
+            o
+            for o in ebay_offers
+            if book_offer_matches(o, title, author, bool(isbn)) and self._within_cap(o, cap, currency)
+        ]
+        if len(ebay_offers) >= 2:
+            used_fig = self._to_local(
+                self._figure(ebay_offers, "used, good (median of eBay fixed-price listings)", query), currency
+            )
+            if market and not market.endswith(country.upper()):
+                used_fig.note = f"no local eBay marketplace for {country}; {market} listings converted"
+            return used_fig
+        used_fig.note = "no used price found from any configured source"
+        return used_fig
+
+    # ---------------------------------------------------------------- items
+    def item(self, query: str, brand_model: str, country: str) -> tuple[str, PriceFigure]:
+        """Returns (status, figure): 'priced' when brand/model offers match, else a sourced 'range'."""
+        currency = COUNTRY_CURRENCY.get(country.upper(), "")
+        q = brand_model or query
+        offers = [
+            o
+            for o in self.serp.search(q, country)
+            if o.condition == "new" and (o.currency == currency or not o.currency)
+        ]
+        if brand_model:
+            toks = content_tokens(brand_model)
+            matched = [o for o in offers if toks and all(t in content_tokens(o.title) for t in toks[:2])]
+            if len(matched) >= 1:
+                fig = self._figure(matched, "new", q)
+                fig.currency = currency
+                fig.low = fig.high = fig.amount
+                return "priced", fig
+        if len(offers) >= 3:
+            fig = self._figure(offers, "new, comparable items (brand/model not legible)", q)
+            fig.currency = currency
+            fig.note = f"range = 25th-75th percentile of {fig.offers_used} comparable offers"
+            return "range", fig
+        return "unpriced", PriceFigure(
+            currency=currency, query=q, note="not enough comparable offers from configured sources"
+        )
