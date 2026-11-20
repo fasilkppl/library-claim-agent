@@ -1,0 +1,11 @@
+book_no,shelf,position,title,author,legible,spine_height_cm,spine_thickness_cm
+1,table shelf,1,A Tale of Two Cities,Charles Dickens,yes,22.4,3.3
+2,table shelf,2,And the Mountains Echoed,Khaled Hosseini,yes,18.9,3.0
+3,table shelf,3,The Almanack of Naval Ravikant,Eric Jorgenson,yes,20.8,1.5
+4,table shelf,4,Rework,Jason Fried & David Heinemeier Hansson,yes,21.5,1.8
+5,table shelf,5,Principles of Building AI Agents,Sam Bhagwat,yes,20.5,1.0
+6,table shelf,6,Patterns for Building AI Agents,Sam Bhagwat,yes,20.7,0.6
+7,table shelf,7,Wings of Fire,A.P.J. Abdul Kalam,yes,23.0,1.5
+8,table shelf,8,Go Set a Watchman,Harper Lee,yes,19.7,1.9
+9,table shelf,9,The Lost Symbol,Dan Brown,yes,24.0,4.5
+10,table shelf,10,My Experiments with Truth,M.K. Gandhi,yes,19.5,2.8
