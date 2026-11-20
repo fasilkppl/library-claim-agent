@@ -28,6 +28,7 @@ from claimagent.contract import (
 )
 from claimagent.pipeline.geometry import M2_TO_FT2
 from claimagent.pipeline.price.engine import PriceEngine, PriceFigure
+from claimagent.pipeline.resolve import english_words
 
 RARE_WORDS = re.compile(r"\b(first edition|1st edition|signed|limited edition|numbered|inscribed|antiquarian)\b", re.I)
 ASSUMPTIONS = [
@@ -45,6 +46,8 @@ ASSUMPTIONS = [
 ]
 
 log = logging.getLogger(__name__)
+UNSURE_ITEM_CONF = 0.6  # below this detector confidence, an item the vision model could not name is not priced
+PRICE_WORKERS = 8  # price lookups in parallel: each waits on a shopping search, not on this machine
 
 
 def _book_price(fig: PriceFigure, used: bool) -> BookPrice:
@@ -62,6 +65,18 @@ def _book_price(fig: PriceFigure, used: bool) -> BookPrice:
         offers_used=fig.offers_used,
         note=fig.note,
     )
+
+
+def _reads_as_words(text: str) -> bool:
+    """Printed text is used as a brand or model only when it reads as words: OCR noise on an object ("12 8bun
+    ong", "C perch serch youeг") would search for something else entirely."""
+    if re.search(r"[^\x00-\u024f]", text):
+        return False
+    words = [w for w in re.findall(r"[A-Za-z]+", text) if len(w) >= 3]
+    if not words:
+        return False
+    known = sum(1 for w in words if w.lower() in english_words())
+    return known / len(words) >= 0.6
 
 
 def threshold_local(engine: PriceEngine, s: Settings, currency: str) -> float | None:
@@ -114,12 +129,13 @@ def price_and_assemble(
         if status != "identified":
             return None
         try:
-            return engine.book(r["title"], r.get("author", ""), r.get("isbn", ""), r.get("volume_id", ""), country)
+            author = r.get("author_catalogue") or r.get("author", "")
+            return engine.book(r["title"], author, r.get("isbn", ""), r.get("volume_id", ""), country)
         except Exception:  # one book's price lookup failing must not cost the whole packet
             log.exception("price lookup failed for %s", r.get("title"))
             return None
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=PRICE_WORKERS) as pool:
         prices = list(pool.map(do_price, plan))
 
     books: list[Book] = []
@@ -169,7 +185,7 @@ def price_and_assemble(
         )
         books.append(book)
         if status == "unidentified":
-            why = (
+            why = r.get("demoted") or (
                 "spine not legible"
                 if not r.get("readable")
                 else (
@@ -188,6 +204,9 @@ def price_and_assemble(
                         reason=f'low-confidence title match ({conf:.2f}); check "{book.title}" against frame',
                     )
                 )
+            check = r.get("check") or {}
+            if check.get("review"):
+                review.append(ReviewEntry(ref_id=bid, reason=f"author check: {check['review']}"))
             if new_fig.amount is None:
                 review.append(ReviewEntry(ref_id=bid, reason=f"no replacement price: {new_fig.note}"))
             elif new_fig.converted:
@@ -220,8 +239,12 @@ def price_and_assemble(
         brand = ""
         if it["text"]:
             words = " ".join(it["text"])
-            if len(re.sub(r"[^A-Za-z]", "", words)) >= 3 and len(words.split()) <= 4:
+            if len(re.sub(r"[^A-Za-z]", "", words)) >= 3 and len(words.split()) <= 4 and _reads_as_words(words):
                 brand = words  # text printed on the object itself (a logo or a model plate)
+        if it.get("vision_check") == "unknown" and float(it.get("confidence", 0)) < UNSURE_ITEM_CONF:
+            # Neither the vision model nor the detector is sure what it is: pricing the detector's guess (a
+            # pressure cooker called a "cup", an iron a "mouse") would put a wrong product in the claim.
+            status = "unpriced"
         if it["category"] == "art":
             status = "needs_appraisal"
             ans = _nearest_answer(art_answers, store, it)
@@ -235,9 +258,13 @@ def price_and_assemble(
         _, status, query, brand, _ = p
         if status == "needs_appraisal":
             return None
+        if status == "unpriced":
+            return "unpriced", PriceFigure(
+                currency=currency, query=query, note="object not recognised clearly: not priced, for review"
+            )
         return engine.item(query, brand, country)
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=PRICE_WORKERS) as pool:
         item_prices = list(pool.map(do_item, plan_items))
 
     out_items: list[Item] = []

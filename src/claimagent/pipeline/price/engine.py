@@ -9,6 +9,7 @@ Rules (from the brief):
 
 from __future__ import annotations
 
+import logging
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ from claimagent.pipeline.price.sources import (
     SerperShopping,
 )
 from claimagent.pipeline.resolve import content_tokens
+
+log = logging.getLogger(__name__)
 
 FORMAT_WORDS = {
     "paperback",
@@ -197,6 +200,40 @@ def _listing_parts(listing: str) -> list[str]:
 
 
 MAX_EXTRA_WORDS = 1  # descriptive words in the matching listing part beyond the main title (see DESCRIPTOR_WORDS)
+
+
+ITEM_NOISE = re.compile(
+    r"\b(combo|set of|sets|pack of|packs?|bundle|kit|pcs|pieces|pair of|refill|spare|replacement|gasket|"
+    r"whistle|accessor(y|ies)|cover|stand|holder|organi[sz]er|mini|toy|miniature|keychain|sticker|decal|"
+    r"poster|print|charm|earrings?|pendant|necklace|handbag|bag|t-?shirt)\b|\+|\bx\s?\d\b|\(\s*\d+\s*pcs?\s*\)",
+    re.I,
+)
+
+
+def item_offer_matches(offer: Offer, query: str) -> bool:
+    """The listing sells the product itself: it names the product noun (the last word of the query: "cooker",
+    "iron", "bottle"), not only after "for" (an accessory for it), and it is not a set, pack or accessory."""
+    t = offer.title.lower()
+    if re.search(r"[^\x00-\u024f\u2000-\u206f\u20b9]", offer.title):
+        return False
+    q = content_tokens(query)
+    if not q:
+        return False
+    noun = q[-1]
+    if ITEM_NOISE.search(t) and not ITEM_NOISE.search(query.lower()):
+        return False
+    words = content_tokens(t)
+    hits = [i for i, w in enumerate(words) if w == noun or (len(noun) >= 4 and w.startswith(noun))]
+    if not hits:
+        return False
+    for_at = [i for i, w in enumerate(re.findall(r"[a-z0-9]+", t)) if w == "for"]
+    if for_at:
+        # "Whistle for Pressure Cooker": the product noun only after "for" means an accessory
+        plain = re.findall(r"[a-z0-9]+", t)
+        noun_at = [i for i, w in enumerate(plain) if w == noun or (len(noun) >= 4 and w.startswith(noun))]
+        if noun_at and min(noun_at) > min(for_at):
+            return False
+    return True
 
 
 def _term(term: str) -> re.Pattern[str]:
@@ -474,12 +511,21 @@ class PriceEngine:
     def item(self, query: str, brand_model: str, country: str) -> tuple[str, PriceFigure]:
         """Returns (status, figure): 'priced' when brand/model offers match, else a sourced 'range'."""
         currency = COUNTRY_CURRENCY.get(country.upper(), "")
-        q = brand_model or query
-        offers = [
+        # "orient clothes iron", never just "orient": a brand alone finds every product the brand makes.
+        q = f"{brand_model} {query}".strip() if brand_model else query
+        found = [
             o
             for o in self.serp.search(q, country)
             if o.condition == "new" and (o.currency == currency or not o.currency)
         ]
+        # Only listings of this one product: not a combo or set, not an accessory "for" it, not another product
+        # that shares a word ("Pressure Pan" for a pressure cooker, a "Bucket" handbag for a bucket). Then the
+        # main price band: imports and premium one-offs far above it are not the usual replacement.
+        offers = [o for o in found if item_offer_matches(o, query)]
+        if len(offers) >= 3:
+            band = main_cluster([o.amount for o in offers])
+            offers = [o for o in offers if band and band[0] <= o.amount <= band[-1]]
+        log.info("item %r: %s offers, %s kept as this product in the main price band", q, len(found), len(offers))
         if brand_model:
             toks = content_tokens(brand_model)
             matched = [o for o in offers if toks and all(t in content_tokens(o.title) for t in toks[:2])]
