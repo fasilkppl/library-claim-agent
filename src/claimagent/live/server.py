@@ -24,7 +24,7 @@ from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
@@ -129,6 +129,15 @@ def service_worker() -> FileResponse:
     return FileResponse(settings.web_dir / "sw.js", media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
+@app.post("/api/artest")
+async def artest_log(request: Request) -> JSONResponse:
+    """AR diagnostics from web/artest.html: one JSON line per sample, appended to sweeps/artest.log."""
+    body = await request.body()
+    with (settings.sweeps_dir / "artest.log").open("ab") as f:
+        f.write(body[:4000].replace(b"\n", b" ") + b"\n")
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/health")
 def health() -> JSONResponse:
     s = get_settings()
@@ -188,6 +197,7 @@ async def _binary(session: LiveSession, data: bytes) -> None:
             await asyncio.to_thread(session.on_frame, header, jpeg, depth)
 
 
+GUIDE_ACTIONS = {"next_shelf", "books_done"}
 _tasks: set[asyncio.Task[None]] = set()
 
 
@@ -212,6 +222,10 @@ async def _text(session: LiveSession, raw: str) -> None:
         _spawn(session.end_sweep())
     elif kind == "ar_status" and msg.get("state") in ("starting", "ready", "lost"):
         _spawn(session.on_ar_status(str(msg["state"])))
+    elif kind == "guide" and msg.get("action") in GUIDE_ACTIONS:
+        _spawn(session.guide_action(str(msg["action"])))
+    elif kind in ("client_log", "client_error"):
+        session.on_client_log(msg)
     elif kind == "text" and isinstance(msg.get("text"), str) and msg["text"].strip():
         await session.on_user_text(msg["text"].strip()[:500])
 

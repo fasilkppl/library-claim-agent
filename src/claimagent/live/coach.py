@@ -23,7 +23,6 @@ from claimagent.pipeline.household import CATEGORY
 log = logging.getLogger(__name__)
 
 AR_STARTING = "Move the phone slowly left and right for a few seconds, so the AR tracking can start."
-AR_READY = "AR is ready. Begin with the first bookshelf, top to bottom, at about an arm's length."
 AR_LOST = (
     "I've lost track of where the phone is. Please move more slowly. "
     "I'll measure the books from the catalogue instead, and the room may not be measured."
@@ -63,6 +62,7 @@ class Coach:
         self.s, self.store = s, store
         self._can_speak, self._speak, self._elapsed_ms = can_speak, speak, elapsed_ms
         self.st = _State()
+        self.step_of: Callable[[], str] = lambda: "books"  # the guide's current step
 
     def reset(self) -> None:
         self.st = _State(last_progress=time.monotonic())
@@ -71,9 +71,12 @@ class Coach:
     def hint(self, kind: str, text: str, gap: float = 7.0, per_kind: float = 20.0) -> None:
         now = time.monotonic()
         if now - self.st.last_spoken < gap or now - self.st.last_by_kind.get(kind, 0) < per_kind:
+            log.debug("hint %s held back (spoke too recently): %s", kind, text)
             return
         if not self._can_speak():
+            log.debug("hint %s held back (talking or not sweeping): %s", kind, text)
             return
+        log.info("HINT %s: %s", kind, text)
         self.st.last_spoken = now
         self.st.last_by_kind[kind] = now
         self.store.log_event("hint", self._elapsed_ms(), hint=kind, text=text)
@@ -121,7 +124,9 @@ class Coach:
     def on_frame(self, d: dict[str, Any], spines_logged: int, spines_readable: Callable[[], int]) -> None:
         """Rules on one analysed keyframe: glare, unreadable or cut-off shelves, art, progress, coverage."""
         st = self.st
-        spines = d["spines"]
+        step = self.step_of()
+        # Only advice for the current part of the walk: spine advice on the shelves, room advice in the room.
+        spines = d["spines"] if step == "books" else []
         qd = d["quality"]
         st.glare_run = st.glare_run + 1 if qd["book_glare"] > self.s.glare_max and spines else 0
         if st.glare_run >= 2:
@@ -147,16 +152,9 @@ class Coach:
                 if not any(abs(key - k) < 8 for k in st.asked_art):
                     st.asked_art.add(key)
                     self.hint("art", "I can see a framed picture. Is it an original or a print?", gap=4, per_kind=15)
-        now = time.monotonic()
-        if now - st.last_progress > 25 and spines_logged:
-            st.last_progress = now
-            self.hint(
-                "progress",
-                f"Logged {spines_logged} spines so far, {spines_readable()} with readable text.",
-                per_kind=25,
-            )
+        # No spoken running counts: live counts still include spines seen twice, so they would mislead.
         elapsed = self._elapsed_ms() / 1000
-        if st.pitches and elapsed > 60:
+        if step == "room" and st.pitches and elapsed > 60:
             if max(st.pitches) < 35:
                 self.hint("ceiling", "Please point the camera up at the ceiling for a moment.", per_kind=45)
             elif min(st.pitches) > -35:

@@ -1,7 +1,7 @@
 // Service worker: makes the app installable and shows a clear page when the Mac server is not reachable.
 // All models run on the Mac, so nothing else is cached: data always comes fresh from the server.
 const OFFLINE = "/web/offline.html";
-const CACHE = "claim-shell-v3"; // bump whenever offline.html, styles.css or the icon changes
+const CACHE = "claim-shell-v5"; // bump whenever offline.html, styles.css or the icon changes
 const SHELL = [OFFLINE, "/web/styles.css", "/web/icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {

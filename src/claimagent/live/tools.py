@@ -3,6 +3,7 @@ as evidence for the pipeline. None of them produces a number, title or price."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from claimagent.capture.store import SweepStore
@@ -68,7 +69,8 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "shelf_width",
-            "description": "The policyholder states the width of the shelf in view.",
+            "description": "The policyholder explicitly states how wide the bookshelf in view is (for example "
+            "'this shelf is 90 centimetres wide'). Never for the size of the room, a wall or anything else.",
             "parameters": {
                 "type": "object",
                 "properties": {"statement": {"type": "string"}, "width_cm": {"type": "number"}},
@@ -80,7 +82,7 @@ TOOLS: list[dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "end_sweep",
-            "description": "The policyholder says they have finished walking the room.",
+            "description": "The policyholder says the whole sweep is over and they want the claim packet now.",
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -127,3 +129,41 @@ def run_tool(store: SweepStore, name: str, args: dict[str, Any], t_ms: int) -> d
     if name == "end_sweep":
         return {"ok": True, "result": "ending the sweep"}
     return {"ok": False, "error": f"unknown tool {name}"}
+
+
+# Facts about the claim: recorded only while sweeping (after it, the packet is already being built from them).
+FACT_TOOLS = {"skip_region", "note_book", "art_answer", "shelf_width"}
+_SKIP = re.compile(r"\b(skip|not mine|isn'?t mine|aren'?t mine|don'?t count|exclude|not ours|belongs? to)\b")
+_NOTE = re.compile(r"\b(first edition|1st edition|signed|autographed)\b")
+_ART = re.compile(r"\b(print|original|reproduction|poster)\b")
+_ORIGINAL = re.compile(r"\boriginal\b|\bnot (a |just a )?print\b")
+SAID = {
+    "skip_region": "Okay, I'll leave that shelf out.",
+    "note_book": "Noted. That book goes to an expert for appraisal.",
+    "art_print": "Got it, a print.",
+    "art_original": "Noted, an original. It goes to an expert for appraisal.",
+}
+
+
+def rule_tool(text: str) -> tuple[str, dict[str, Any], str] | None:
+    """Clear statements are recorded by rule, not left to the language model, which mixes these tools up
+    ("that painting is just a print" recorded as a skipped shelf). Returns (tool, arguments, reply)."""
+    t = text.lower()
+    if _NOTE.search(t):
+        args = {"statement": text, "first_edition": "edition" in t, "signed": bool(re.search(r"signed|autograph", t))}
+        return "note_book", args, SAID["note_book"]
+    if _SKIP.search(t):
+        return "skip_region", {"statement": text}, SAID["skip_region"]
+    if _ART.search(t):
+        is_print = not _ORIGINAL.search(t)
+        return (
+            "art_answer",
+            {"statement": text, "is_print": is_print},
+            SAID["art_print" if is_print else "art_original"],
+        )
+    return None
+
+
+# The language model may only record the country and currency (before the walk) and end the sweep; facts about
+# the contents are recorded by rule (rule_tool), because the model recorded things nobody said.
+LLM_TOOLS = [t for t in TOOLS if t["function"]["name"] in ("set_locale", "end_sweep")]

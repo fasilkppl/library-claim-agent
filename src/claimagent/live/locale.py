@@ -41,3 +41,34 @@ def guess_country(locale: str, tz: str) -> str:
     if tz.startswith("America/") and region in ("", "US"):
         return "US"
     return region
+
+
+_YES = re.compile(
+    r"\b(yes|yeah|yep|yup|ya|correct|right|sure|okay|ok|absolutely|exactly|fine|perfect|haan|confirmed?)\b"
+)
+_NO = re.compile(r"\b(no|not|nope|wrong|actually|instead)\b")
+
+
+def confirms(text: str) -> bool:
+    """A short yes to "is that right?" ("Yes", "I'm in India, rupees is right"). A correction is not one."""
+    t = text.lower()
+    return len(t.split()) <= 10 and bool(_YES.search(t)) and not _NO.search(t)
+
+
+_NAMED = {
+    **{name.lower().removeprefix("the "): code for code, name in COUNTRY_NAMES.items()},
+    "usa": "US",
+    "america": "US",
+    "uk": "GB",
+    "england": "GB",
+    "britain": "GB",
+}
+
+
+def country_named(text: str) -> str:
+    """The country a sentence names ("I'm in India", "we're in the UK"), or empty."""
+    t = text.lower()
+    for name, code in sorted(_NAMED.items(), key=lambda kv: -len(kv[0])):
+        if re.search(rf"\b{re.escape(name)}\b", t):
+            return code
+    return ""

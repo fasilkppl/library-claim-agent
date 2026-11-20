@@ -32,6 +32,20 @@ export function setAr(state) {
   chip.textContent = { starting: "AR starting", ready: "AR tracking", lost: "AR lost" }[state] || "AR";
 }
 
+// The guide card: the current target and the buttons that finish it.
+export function renderGuide(m, onAction) {
+  $("guide").hidden = m.step === "done";
+  $("guideTitle").textContent = m.title;
+  $("guideText").textContent = m.text;
+  const box = $("guideActions"); box.replaceChildren();
+  for (const a of m.actions) {
+    const b = document.createElement("button");
+    b.textContent = a.label; b.className = a.id.endsWith("_done") ? "" : "primary";
+    b.onclick = () => onAction(a.id);
+    box.append(b);
+  }
+}
+
 // One phase at a time: only the buttons that make sense now are shown.
 const PHASES = {
   idle:       { step: "connect", show: ["btnConnect"] },

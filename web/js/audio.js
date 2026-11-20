@@ -49,6 +49,18 @@ registerProcessor('down', Down);`;
 let playCtx = null, playHead = 0, playing = [];
 
 let micStarted = false;
+// Microphone diagnostics, sent with the capture stats: is the track live and unmuted (another app, such as a
+// screen recorder, can take the microphone), and how loud is the input.
+let micTrack = null, micCtxRef = null, micPeak = 0, micSum = 0, micN = 0;
+export function micStats() {
+  const out = {
+    mic_state: micTrack ? micTrack.readyState : "none", mic_muted: micTrack ? micTrack.muted : null,
+    mic_ctx: micCtxRef ? micCtxRef.state : "none",
+    mic_rms: micN ? Math.round(1000 * Math.sqrt(micSum / micN)) / 1000 : 0, mic_peak: Math.round(1000 * micPeak) / 1000,
+  };
+  micPeak = 0; micSum = 0; micN = 0;
+  return out;
+}
 export async function startMic() {
   if (micStarted) return; // a retry or reconnect keeps the microphone already running
   const stream = await navigator.mediaDevices.getUserMedia({
@@ -66,9 +78,14 @@ export async function startMic() {
   }
   await micCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], { type: "application/javascript" })));
   const node = new AudioWorkletNode(micCtx, "down");
-  node.port.onmessage = (e) => sendTagged(0x01, new Uint8Array(e.data));
+  node.port.onmessage = (e) => {
+    const pcm = new Int16Array(e.data);
+    for (let i = 0; i < pcm.length; i += 8) { const v = Math.abs(pcm[i]) / 32768; micSum += v * v; micN++; if (v > micPeak) micPeak = v; }
+    sendTagged(0x01, new Uint8Array(e.data));
+  };
   source.connect(node);
   playCtx = new AudioContext({ sampleRate: 24000 });
+  micTrack = stream.getAudioTracks()[0] || null; micCtxRef = micCtx;
   micStarted = true;
 }
 

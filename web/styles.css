@@ -125,3 +125,8 @@ body.ar #panels{grid-template-columns:1fr}body.ar #books{max-height:16vh}
 body.ar .tiles b{font-size:20px}
 
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* Guided sweep: the one current target and the buttons that finish it */
+.guide{border:2px solid var(--accent)}
+.guide-step{margin:0 0 4px;font-size:20px;font-weight:700}
+.guide-text{margin:0 0 12px;color:var(--muted)}

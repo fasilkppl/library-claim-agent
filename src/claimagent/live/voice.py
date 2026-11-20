@@ -76,7 +76,16 @@ class Segmenter:
         self.silence = 0
         self.speech_chunks = 0
         self.last_speech_ratio = 0.0  # share of the last utterance's chunks that the VAD called speech
+        self.window_chunks = 0  # diagnostics: audio chunks and the highest speech probability since last read
+        self.window_max_prob = 0.0
         self.pending = np.zeros(0, np.float32)
+
+    def window(self) -> tuple[int, float]:
+        """(audio chunks, highest speech probability) since the last call: is audio arriving, does it sound
+        like speech at all."""
+        out = (self.window_chunks, round(self.window_max_prob, 2))
+        self.window_chunks, self.window_max_prob = 0, 0.0
+        return out
 
     def feed(self, pcm16: bytes, agent_speaking: bool) -> list[tuple[str, np.ndarray | None]]:
         """Returns events: ('start', None) when speech begins, ('end', audio) when an utterance ends."""
@@ -86,6 +95,8 @@ class Segmenter:
         while len(self.pending) >= CHUNK:
             chunk, self.pending = self.pending[:CHUNK], self.pending[CHUNK:]
             p = self.vad.prob(chunk)
+            self.window_chunks += 1
+            self.window_max_prob = max(self.window_max_prob, p)
             if not self.in_speech:
                 self.history = [*self.history[-self.preroll :], chunk]
                 thr, need = (
@@ -119,6 +130,7 @@ MIN_SPEECH_RATIO = 0.35  # an utterance that is mostly not speech (a fan, a clat
 MIN_AVG_LOGPROB = -1.0  # Whisper's own token confidence; below it the text is mostly guessed
 MAX_COMPRESSION = 2.4  # repetitive output ("Bye. Bye. Bye.") compresses far better than speech
 MAX_NO_SPEECH = 0.6
+MAX_NON_ENGLISH = 0.15  # share of non-English letters (þ, æ, accents) above which an English transcript is noise
 
 
 @dataclass
@@ -144,6 +156,9 @@ def invented_reason(
         return f"mostly not speech (VAD {speech_ratio:.0%})"
     if INVENTED.search(text):
         return "a phrase Whisper invents on noise"
+    letters = [c for c in text if c.isalpha()]
+    if letters and sum(1 for c in letters if not c.isascii()) / len(letters) > MAX_NON_ENGLISH:
+        return "not English letters (Whisper inventing on noise)"
     if len(words) >= 4 and len(set(words)) / len(words) < 0.45:
         return "repeated words"
     content = [w for w in words if len(w) > 3]

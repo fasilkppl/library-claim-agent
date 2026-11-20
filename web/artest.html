@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AR Depth Test</title>
+<style>
+  :root { --bg: #0d1117; --fg: #e6edf3; --accent: #2f81f7; --warn: #d29922; --ok: #3fb950; }
+  body { margin: 0; font: 16px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  main { padding: 16px; max-width: 640px; margin: 0 auto; }
+  button { font: inherit; font-weight: 600; padding: 14px 22px; border-radius: 999px; border: 0;
+           background: var(--accent); color: #fff; }
+  #overlay { position: fixed; inset: 0; pointer-events: none; display: none; }
+  body.ar #overlay { display: block; }
+  #panel { position: absolute; left: 12px; right: 12px; top: 12px; background: rgba(13,17,23,.78);
+           border-radius: 14px; padding: 12px 14px; font: 600 20px/1.35 ui-monospace, monospace; }
+  #cross { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px;
+           border: 3px solid #ff3b30; border-radius: 50%; }
+  #stop { pointer-events: auto; position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); }
+  .ok { color: var(--ok); } .warn { color: var(--warn); }
+  ol { padding-left: 20px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AR depth test</h1>
+  <p>Checks whether this phone's AR gives true distances. Results are logged on the Mac.</p>
+  <ol>
+    <li>Put a tape mark on the floor exactly <b>1 m</b> from a plain wall.</li>
+    <li>Tap Start. Move the phone slowly left and right for 5 seconds until it says <b>tracking</b>.</li>
+    <li>Stand on the mark, point the red circle at the wall, hold still 5 seconds.</li>
+    <li>Step back to <b>2 m</b>, hold still 5 seconds. Then tap Stop.</li>
+  </ol>
+  <button id="start">Start AR test</button>
+  <p id="msg"></p>
+</main>
+<div id="overlay">
+  <div id="panel">starting…</div>
+  <div id="cross"></div>
+  <button id="stop">Stop</button>
+</div>
+<script type="module">
+const $ = (id) => document.getElementById(id);
+const post = (o) => fetch("/api/artest", { method: "POST", body: JSON.stringify(o) }).catch(() => {});
+let session = null;
+
+$("start").onclick = async () => {
+  try {
+    if (!navigator.xr || !(await navigator.xr.isSessionSupported("immersive-ar"))) {
+      $("msg").textContent = "This browser says AR is not supported."; post({ event: "unsupported" }); return;
+    }
+    session = await navigator.xr.requestSession("immersive-ar", {
+      requiredFeatures: ["local-floor"],
+      optionalFeatures: ["depth-sensing", "hit-test", "dom-overlay"],
+      depthSensing: { usagePreference: ["cpu-optimized"], dataFormatPreference: ["luminance-alpha", "float32"] },
+      domOverlay: { root: $("overlay") },
+    });
+  } catch (e) { $("msg").textContent = "Could not start AR: " + e; post({ event: "start_failed", error: String(e) }); return; }
+  document.body.classList.add("ar");
+  post({ event: "started", features: [...(session.enabledFeatures || [])], depthUsage: session.depthUsage,
+         depthFormat: session.depthDataFormat, ua: navigator.userAgent });
+  const gl = document.createElement("canvas").getContext("webgl2", { xrCompatible: true });
+  await session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
+  const ref = await session.requestReferenceSpace("local-floor");
+  let hitSource = null;
+  try { hitSource = await session.requestHitTestSource({ space: await session.requestReferenceSpace("viewer") }); }
+  catch (e) { post({ event: "no_hit_test", error: String(e) }); }
+  let start = null, lastPost = 0, t0 = performance.now();
+  const onFrame = (t, frame) => {
+    session.requestAnimationFrame(onFrame);
+    const layer = session.renderState.baseLayer;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+    const pose = frame.getViewerPose(ref);
+    if (!pose) { $("panel").innerHTML = '<span class="warn">no pose yet: move slowly</span>'; return; }
+    const p = pose.transform.position;
+    start = start || [p.x, p.y, p.z];
+    const moved = Math.hypot(p.x - start[0], p.y - start[1], p.z - start[2]);
+    let depth = null, dInfo = null;
+    try {
+      const di = frame.getDepthInformation(pose.views[0]);
+      if (di) { depth = di.getDepthInMeters(0.5, 0.5); dInfo = { w: di.width, h: di.height, raw: di.rawValueToMeters }; }
+    } catch (e) { dInfo = { error: String(e) }; }
+    let hit = null;
+    if (hitSource) {
+      const r = frame.getHitTestResults(hitSource);
+      if (r.length) { const h = r[0].getPose(ref).transform.position; hit = Math.hypot(h.x - p.x, h.y - p.y, h.z - p.z); }
+    }
+    const tracking = !pose.emulatedPosition;
+    const f = (v) => (v == null ? "—" : v.toFixed(2) + " m");
+    $("panel").innerHTML =
+      `<span class="${tracking ? "ok" : "warn"}">${tracking ? "tracking" : "tracking LOST"}</span><br>` +
+      `depth at circle: ${f(depth)}<br>plane distance: ${f(hit)}<br>phone height: ${f(p.y)}<br>moved: ${f(moved)}`;
+    if (t - lastPost > 500) {
+      lastPost = t;
+      post({ t: Math.round(t - t0), tracking, x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
+             moved: +moved.toFixed(3), depth_centre: depth == null ? null : +depth.toFixed(3),
+             hit_distance: hit == null ? null : +hit.toFixed(3), depth_info: dInfo });
+    }
+  };
+  session.requestAnimationFrame(onFrame);
+  session.addEventListener("end", () => { document.body.classList.remove("ar"); post({ event: "ended" }); });
+};
+$("stop").onclick = () => session && session.end();
+</script>
+</body>
+</html>

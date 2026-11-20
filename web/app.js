@@ -3,7 +3,7 @@ import { playAgentAudio, startMic, stopPlayback } from "./js/audio.js";
 import { startAR, startCamera, startSweepClock, stopCapture } from "./js/capture.js";
 import { connect, sendJson } from "./js/net.js";
 import {
-  $, hint, initTabs, log, renderInventory, renderPacket, setConnected, setLocale, setPhase, status,
+  $, hint, initTabs, log, renderGuide, renderInventory, renderPacket, setConnected, setLocale, setPhase, status,
 } from "./js/ui.js";
 
 const MARKER_CM = 10;
@@ -21,8 +21,9 @@ function onJson(m) {
     case "tool": log(`[recorded ${m.name}]`, "s"); break;
     case "audio_stop": stopPlayback(); break;
     case "inventory": renderInventory(m); break;
+    case "guide": renderGuide(m, (action) => sendJson({ type: "guide", action })); break;
     case "state":
-      if (m.state === "processing") { stopCapture(); setPhase("processing"); status("Sweep ended. Building the claim packet…"); }
+      if (m.state === "processing") { stopCapture(); $("guide").hidden = true; setPhase("processing"); status("Sweep ended. Building the claim packet…"); }
       if (m.state === "failed") { setPhase("failed"); status("The packet could not be built. The frames are saved; reload the page to start again."); }
       break;
     case "pipeline":
@@ -49,19 +50,25 @@ $("btnConnect").onclick = async () => {
     await startMic();
     await connect({ onJson, onBinary: playAgentAudio, onClose });
     setConnected(true);
-    arSupported = !!(navigator.xr && await navigator.xr.isSessionSupported("immersive-ar").catch(() => false));
+    // AR is opt-in (open the page with ?ar=1): on phones whose AR tracking keeps failing, the AR sweep loses
+    // frames and measurements, so the camera sweep is the default.
+    const arWanted = new URLSearchParams(location.search).has("ar");
+    arSupported = arWanted && !!(navigator.xr && await navigator.xr.isSessionSupported("immersive-ar").catch(() => false));
     sendJson({ type: "hello", locale: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
                device: navigator.userAgent, capture_mode: arSupported ? "webxr" : "camera",
                marker_side_cm: $("chkMarker").checked ? MARKER_CM : null });
     setPhase("connected", { ar: arSupported });
-    if (!arSupported) log("AR is not available on this device: camera-only sweep (no room measurement).", "s");
+    if (!arSupported) log("Camera sweep (AR off): the room is not measured.", "s");
   } catch (e) { status(`Could not start: ${e}`); $("btnConnect").disabled = false; }
 };
 
 async function begin(kind) {
   setPhase("sweeping");
   try { kind === "ar" ? await startAR() : await startCamera(); }
-  catch (e) { log(`Could not start the ${kind} sweep: ${e}`, "h"); setPhase("connected", { ar: arSupported }); return; }
+  catch (e) {
+    sendJson({ type: "client_error", message: `could not start ${kind} sweep: ${e}` });
+    log(`Could not start the ${kind} sweep: ${e}`, "h"); setPhase("connected", { ar: arSupported }); return;
+  }
   startSweepClock(); sendJson({ type: "start" });
 }
 $("btnAR").onclick = () => begin("ar");
@@ -78,6 +85,10 @@ let installPrompt = null;
 window.addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installPrompt = e; $("btnInstall").hidden = false; });
 $("btnInstall").onclick = async () => { if (!installPrompt) return; installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; $("btnInstall").hidden = true; };
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+
+// Phone-side errors go to the Mac's debug.log too.
+window.addEventListener("error", (e) => sendJson({ type: "client_error", message: String(e.message), where: `${e.filename}:${e.lineno}` }));
+window.addEventListener("unhandledrejection", (e) => sendJson({ type: "client_error", message: String(e.reason) }));
 
 initTabs();
 setPhase("idle");
