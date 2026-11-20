@@ -77,21 +77,34 @@ def _num(v: str | None) -> float | None:
 
 
 def title_match(a: str, b: str) -> bool:
-    """Strict on purpose (a lenient matcher would inflate accuracy): at least 70% of the longer title's
-    words must be in the other title (fuzzy per word, for accents and OCR-style spelling)."""
+    """Strict on purpose (a lenient matcher would inflate accuracy). A catalogue title is compared whole, and
+    also by its main part and its subtitle on their own ("Wings of Fire: An Autobiography" is "Wings of Fire";
+    "Mahatma Gandhi: The Story of My Experiments with Truth" is "My Experiments with Truth")."""
     va, vb = volume_numbers(a), volume_numbers(b)
     if va and vb and not (va & vb):
         return False  # volume II is a different book from volume I
+    parts_a = [a, *[x for x in a.split(":", 1) if ":" in a]]
+    parts_b = [b, *[x for x in b.split(":", 1) if ":" in b]]
+    return any(_same_title(x, y) for x in parts_a for y in parts_b)
+
+
+def _same_title(a: str, b: str) -> bool:
     ta, tb = content_tokens(a), content_tokens(b)
     if not ta or not tb:
         return False
     short, long_ = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
-    hits = sum(1 for t in long_ if any(fuzz.ratio(t, u) >= 85 for u in short))
-    if hits / len(long_) >= 0.7:
+
+    def found(t: str, words: list[str]) -> bool:
+        return any(fuzz.ratio(t, u) >= 85 for u in words)
+
+    # Every distinctive word of the shorter title must be there: "Principles of Building AI Agents" is not
+    # "Patterns for Building AI Agents", though three of their four words match.
+    if not all(found(t, long_) for t in short if len(t) >= 5):
+        return False
+    if sum(1 for t in long_ if found(t, short)) / len(long_) >= 0.7:
         return True
-    # Series name or subtitle added by the catalogue: the shorter title (3+ meaningful words) is fully inside.
-    inside = sum(1 for u in short if any(fuzz.ratio(t, u) >= 85 for t in long_))
-    return len(short) >= 3 and inside == len(short)
+    # The shorter title (2+ meaningful words) fully inside the longer one: a series name or prefix added.
+    return len(short) >= 2 and all(found(t, long_) for t in short)
 
 
 def _pct(sys_v: float | None, true_v: float | None) -> float | None:
