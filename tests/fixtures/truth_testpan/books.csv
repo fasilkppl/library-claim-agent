@@ -1,0 +1,36 @@
+book_no,shelf,position,title,author,legible,spine_height_cm,spine_thickness_cm
+1,philosophy,1,Gesammelte Aufsätze II,Ebert,yes,,
+2,philosophy,2,Die Natur und die Griechen,Schrödinger,yes,,
+3,philosophy,3,The Physical World of the Greeks,Sambursky,yes,,
+4,philosophy,4,Antike Themen und ihre moderne Verwandlung,Bubner,yes,18.5,1.4
+5,philosophy,5,Shame and Necessity,Bernard Williams,yes,,
+6,philosophy,6,Antike Denker über den Staat,Adomeit,yes,,
+7,philosophy,7,Griechisches Rechtsdenken I,Erik Wolf,yes,,
+8,philosophy,8,Griechisches Rechtsdenken II,Erik Wolf,yes,24.75,3.9
+9,philosophy,9,Einführung in die Philosophie des Mythos,Brisson,yes,22.7,1.75
+10,philosophy,10,Glaubten die Griechen an ihre Mythen?,Veyne,yes,,
+11,philosophy,11,Die Theorie des Schönen in der Antike,Grassi,yes,21.6,3.25
+12,philosophy,12,Geschichte der Sprachtheorie,Schmitter,yes,24.4,3.6
+13,philosophy,13,Die Geschichte der Sprachphilosophie,Coseriu,yes,21.9,1.6
+14,philosophy,14,Philosophen der Antike I,Ricken,yes,,
+15,philosophy,15,Philosophen der Antike II,Ricken,yes,,
+16,german,1,Auf großer Fahrt,Sven Hedin,yes,,
+17,german,2,In Nacht und Eis I,Nansen,yes,,
+18,german,3,In Nacht und Eis II,Nansen,yes,,
+19,german,4,Transhimalaja 1,Sven Hedin,yes,,
+20,german,5,Transhimalaja 2,Sven Hedin,yes,,
+21,german,6,Die Geschichte der legendären Länder und Städte,Umberto Eco,yes,,
+22,german,7,Georg Christoph Lichtenberg: Wagnis der Aufklärung,,yes,,
+23,german,8,Tagebuch der Reise nach Italien,Michel de Montaigne,yes,,
+24,german,9,"Wenn es Krieg gibt, gehen wir in die Wüste",Henno Martin,yes,,
+25,german,10,Die Höhlenkinder im Steinhaus,Sonnleitner,yes,,
+26,german,11,Die Höhlenkinder im Pfahlbau,Sonnleitner,yes,,
+27,german,12,Der Orientalist,Tom Reiss,yes,,
+28,german,13,"Gödel, Escher, Bach",Hofstadter,yes,,
+29,german,14,The Cathedral & the Bazaar,Eric S. Raymond,yes,,
+30,german,15,Gemeinsame Werke 1,Borges / Bioy Casares,yes,,
+31,german,16,Erzählungen 1,Jorge Luis Borges,yes,,
+32,german,17,Erzählungen 2,Jorge Luis Borges,yes,,
+33,german,18,Erzählungen 3,Jorge Luis Borges,yes,,
+34,german,19,Das Handwerk des Dichters,Jorge Luis Borges,yes,,
+35,german,20,Ein ewiger Traum,Jorge Luis Borges,yes,,

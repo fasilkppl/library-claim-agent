@@ -1,0 +1,1 @@
+{"url": "https://api.frankfurter.app/latest?from=USD&to=INR", "status": 200, "retrieved_at": "2026-11-18T22:03:31+00:00", "data": {"amount": 1.0, "base": "USD", "date": "2026-11-18", "rates": {"INR": 93.44}}}
