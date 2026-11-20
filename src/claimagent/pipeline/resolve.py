@@ -7,7 +7,9 @@ accepted when the spine text explains it; otherwise the book stays unidentified.
 
 from __future__ import annotations
 
+import logging
 import re
+import statistics
 import time
 import unicodedata
 from dataclasses import dataclass, field
@@ -80,6 +82,8 @@ STOP = {
 }
 ROMAN_TOKENS = {"ii", "iii", "iv", "vi", "vii", "viii", "ix", "xi", "xii"}
 
+log = logging.getLogger(__name__)
+
 
 def norm_tokens(text: str) -> list[str]:
     text = text.replace("ß", "ss").replace("ẞ", "SS")
@@ -112,7 +116,7 @@ WORDLIST = Path("/usr/share/dict/words")  # present on macOS and most Linux syst
 
 
 @lru_cache(maxsize=1)
-def _dictionary() -> frozenset[str]:
+def english_words() -> frozenset[str]:
     try:
         return frozenset(w.strip().lower() for w in WORDLIST.read_text(errors="ignore").split() if len(w.strip()) >= 2)
     except OSError:
@@ -120,6 +124,7 @@ def _dictionary() -> frozenset[str]:
 
 
 GOOGLE_QUERIES_PER_TEXT = 6
+LIVE_QUERIES = 2  # during the walk: the two broadest queries only, so a title is said within seconds
 
 GLUE_WORDS = {"of", "the", "and", "to", "in", "on", "for", "with", "a", "an", "der", "die", "das", "und"}
 
@@ -128,10 +133,35 @@ MAX_VARIANTS = 12
 FALLBACK_SLOTS = 3
 
 
+# Books about a book: their record repeats the book's title ("And the Mountains Echoed by Khaled Hosseini",
+# author "Trivia-on-Books Staff"), so they score as well as the book itself.
+ABOUT_A_BOOK = re.compile(
+    r"\b(trivia|summary|summaries|study guide|sparknotes|cliffsnotes|cliff'?s notes|analysis of|workbook|quiz|"
+    r"companion to|notes on|reader'?s guide|discussion guide|book review|conversation starters|"
+    r"(study|revision|exam|chapter) notes|:\s*notes)\b",
+    re.I,
+)
+
+
+def derivative(c: Candidate) -> bool:
+    """The record is a book about another book (summary, trivia, study guide), not the book. Signs: such words
+    in its title or author, or a title ending "by <name>" where that name is not one of its own authors."""
+    authors = " ".join(c.authors)
+    if ABOUT_A_BOOK.search(c.title) or ABOUT_A_BOOK.search(authors) or re.search(r"\bstaff\b", authors, re.I):
+        return True
+    m = re.search(r"\s+by\s+(.+)$", c.title, re.I)
+    if m:
+        named = set(content_tokens(m.group(1)))
+        own = {t for a in c.authors for t in content_tokens(a)}
+        if named and not (named & own):
+            return True
+    return False
+
+
 def same_work(a: str, b: str) -> bool:
     """Two catalogue titles name the same work: their main titles (before any subtitle) read alike as a whole.
     A one-way word overlap is not enough: "Dune Messiah" contains "Dune" but is another book."""
-    ma, mb = (" ".join(content_tokens(t.split(":")[0])) for t in (a, b))
+    ma, mb = (" ".join(content_tokens(re.sub(r"\s+by\s+.*$", "", t.split(":")[0], flags=re.I))) for t in (a, b))
     return bool(ma and mb) and fuzz.ratio(ma, mb) >= 88
 
 
@@ -139,7 +169,7 @@ def ocr_clean(text: str) -> str:
     """Two common OCR slips on spines, repaired against a word list: one stray letter at the end of a word
     ("GARDENX" -> garden, "HISTORYA" -> history) and a small word glued to the next ("SONGOF" -> song of).
     Anything else, names included, is kept as read; the result is only used as an extra catalogue query."""
-    words = _dictionary()
+    words = english_words()
     if not words:
         return text
     out = []
@@ -355,12 +385,16 @@ class Resolver:
                 seen.append(v)
         return seen
 
-    def candidates(self, spine_text: str, query: str | None = None, google: bool = True) -> list[Candidate]:
+    def candidates(
+        self, spine_text: str, query: str | None = None, google: bool = True, openlibrary: bool = True
+    ) -> list[Candidate]:
         q = query or self.query_text(spine_text)
         if len(q) < 4:
             return []
         out: list[Candidate] = []
         try:
+            if not openlibrary:
+                raise LookupError("open library skipped")
             r = self.http.get(
                 "https://openlibrary.org/search.json",
                 {
@@ -414,15 +448,23 @@ class Resolver:
             pass
         return out
 
-    def resolve(self, spine_text: str, accept: float) -> Resolution:
+    def resolve(self, spine_text: str, accept: float, live: bool = False) -> Resolution:
+        """`live`: during the walk, a fast answer from Google Books' first queries only (Open Library takes
+        5-30 s per query); the full lookup runs after the sweep for the packet."""
         cands: list[Candidate] = []
         queries: list[str] = []
         for k, q in enumerate(self.query_variants(spine_text)):
             if self.deadline is not None and time.monotonic() > self.deadline:
                 break  # the packet must not wait: what is not resolved by now stays unidentified
+            if live and k >= LIVE_QUERIES:
+                break
             queries.append(q)
             # Google Books is rate-limited (100 per minute): it gets the first, broadest queries only.
-            cands += self.candidates(spine_text, q, google=k < GOOGLE_QUERIES_PER_TEXT)
+            found = self.candidates(spine_text, q, google=k < GOOGLE_QUERIES_PER_TEXT, openlibrary=not live)
+            for c in found:
+                if derivative(c):
+                    log.debug("resolve: %r by %s is a book about another book; not a match", c.title, c.authors)
+            cands += [c for c in found if not derivative(c)]
             if cands and max(score(spine_text, c)[0] for c in cands) >= accept:
                 break
         # Ties (the same work in several languages) go to the title closest to the printed words,
@@ -485,7 +527,38 @@ class Resolver:
                 return c
         return None
 
-    def catalogue_height_cm(self, volume_id: str, title: str = "", author: str = "") -> float | None:
+    def catalogue_height_cm(
+        self, volume_id: str, title: str = "", author: str = "", work_url: str = ""
+    ) -> float | None:
+        """Printed height: Google Books first, then the editions Open Library lists for the matched work."""
+        h = self._google_height(volume_id, title, author)
+        if h is None and "openlibrary.org/works/" in work_url:
+            h = self._openlibrary_height(work_url)
+        return h
+
+    def _openlibrary_height(self, work_url: str) -> float | None:
+        """Median printed height over the work's editions that list physical dimensions ("20.6 x 14.7 x 1.8
+        centimeters", "9.3 x 6.2 x 0.6 inches"); the first number is the height."""
+        if self.deadline is not None and time.monotonic() > self.deadline:
+            return None
+        key = work_url.rstrip("/").split("/works/")[-1]
+        try:
+            r = self.http.get(
+                f"https://openlibrary.org/works/{key}/editions.json", {"limit": 100}, source="openlibrary"
+            )
+        except (RuntimeError, LookupError):
+            return None
+        heights = []
+        for e in (r.data or {}).get("entries", []) if r.status < 400 else []:
+            m = re.match(r"\s*([\d.]+)\s*x.*?(centimeters|cm|inches|in)\b", str(e.get("physical_dimensions", "")))
+            if not m:
+                continue
+            h = float(m.group(1)) * (2.54 if m.group(2).startswith("in") else 1.0)
+            if 10 <= h <= 45:
+                heights.append(h)
+        return round(statistics.median(heights), 1) if heights else None
+
+    def _google_height(self, volume_id: str, title: str = "", author: str = "") -> float | None:
         """Printed height from Google Books: the matched volume, else the first edition of the same title and
         author that lists dimensions (Open Library matches carry no Google volume)."""
         if self.deadline is not None and time.monotonic() > self.deadline:

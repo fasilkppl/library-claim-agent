@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import bisect
+import logging
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -17,6 +20,8 @@ from claimagent.pipeline.register import Registrar
 # ============================================================================ select
 KEYFRAME_SHIFT = 0.12  # keep a frame once the view has moved this share of its width (~88% overlap)
 KEYFRAME_MAX_GAP_MS = 2000  # but never leave more than this without a keyframe
+
+log = logging.getLogger(__name__)
 
 
 def is_keyframe(prev: np.ndarray | None, cur: np.ndarray, gap_ms: int) -> tuple[bool, float]:
@@ -76,14 +81,44 @@ def analyze_frames(
     selected: list[FrameMeta],
     analyzer: FrameAnalyzer | None = None,
     progress: Callable[[int, int], None] | None = None,
+    budget_s: float | None = None,
 ) -> dict[int, dict[str, Any]]:
+    """Frames analysed during the walk are reused; the rest are analysed now, the biggest gap in time between
+    analysed frames first, until the time budget is spent (the packet is due within 5 minutes). Frames left
+    over are close in time to analysed ones, so what they show is mostly seen already; they are logged."""
     analyzer = analyzer or FrameAnalyzer(store)
     out: dict[int, dict[str, Any]] = {}
-    for i, m in enumerate(selected):
+    todo: list[FrameMeta] = []
+    for m in selected:
+        hit = analyzer.cached(m)
+        if hit is not None:
+            out[m.seq] = hit
+        else:
+            todo.append(m)
+    t_of = {m.seq: m.t_ms for m in selected}
+    t0 = time.perf_counter()
+    done = len(out)
+    while todo:
+        if budget_s is not None and time.perf_counter() - t0 > budget_s:
+            log.info("analysis budget spent: %s of %s frames left unanalysed", len(todo), len(selected))
+            break
+        times = sorted(t_of[seq] for seq in out)
+        gaps = [_gap(f.t_ms, times) for f in todo]
+        m = todo[gaps.index(max(gaps))]
+        todo.remove(m)
         out[m.seq] = analyzer.analyze(m)
+        done += 1
         if progress:
-            progress(i + 1, len(selected))
+            progress(done, len(selected))
     return out
+
+
+def _gap(t_ms: int, analysed: list[int]) -> float:
+    """Time to the nearest analysed frame (sorted list); infinite when none is analysed yet."""
+    if not analysed:
+        return float("inf")
+    k = bisect.bisect_left(analysed, t_ms)
+    return float(min(abs(t_ms - analysed[j]) for j in (k - 1, k) if 0 <= j < len(analysed)))
 
 
 # ============================================================================ register

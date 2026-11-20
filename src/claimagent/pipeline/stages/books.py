@@ -299,6 +299,10 @@ def read_tracks(
 
         rep = max(t.observations, key=obs_rank)
         row = rows.get(t.id, RowInfo(f"unit {t.segment + 1}", 0))
+        # The shelf the guide was on when this spine was seen (guided sweeps): the most common one.
+        shelf_tags = [(metas[o.seq].extra or {}).get("shelf") for o in t.observations if o.seq in metas]
+        shelves = [int(x) for x in shelf_tags if x is not None]
+        guide_shelf = max(sorted(set(shelves)), key=shelves.count) if shelves else None
         books.append(
             {
                 "track": t.id,
@@ -306,6 +310,7 @@ def read_tracks(
                 "shelf": row.label,
                 "position": row.position,
                 "orientation": t.orientation,
+                "guide_shelf": guide_shelf,
                 "frame_ref": metas[rep.seq].frame_ref,
                 "frame_seq": rep.seq,
                 "bbox": det[rep.seq]["spines"][rep.index]["bbox"],
@@ -333,7 +338,9 @@ def read_tracks(
 
 
 # ============================================================================ resolve
-def resolve_books(store: SweepStore, read: dict[str, Any], resolver: Resolver, s: Settings) -> dict[str, Any]:
+def resolve_books(
+    store: SweepStore, read: dict[str, Any], resolver: Resolver, s: Settings, budget_s: float = 100.0
+) -> dict[str, Any]:
     """Each spine is identified from its cross-frame consensus text, and also from its clearest single-frame
     readings (angled spines are often read whole in only one or two frames). A match found only through a
     single-frame reading is never confident: it can carry a neighbour's leaked line, so it is capped below
@@ -346,7 +353,7 @@ def resolve_books(store: SweepStore, read: dict[str, Any], resolver: Resolver, s
         good = [v for v in b.get("text_variants", []) if _readable(v) and v != b["spine_text"]]
         return good[:SINGLE_READINGS]
 
-    resolver.deadline = time.monotonic() + RESOLVE_BUDGET_S
+    resolver.deadline = time.monotonic() + min(RESOLVE_BUDGET_S, budget_s)
 
     def resolve_all(texts: list[str]) -> dict[str, Any]:
         # Hard stop at the budget: lookups still waiting are abandoned (their spines stay unidentified).
@@ -425,6 +432,7 @@ SINGLE_READINGS = 3
 RESOLVE_BUDGET_S = 100.0  # the packet is due within 5 minutes of the sweep
 HARD_STOP_GRACE_S = 10.0
 RULER_BUDGET_S = 30.0
+RULER_WORKERS = 6
 
 
 def _norm_title(title: str) -> str:
@@ -470,6 +478,7 @@ def measure_books(
     resolved: dict[str, Any],
     resolver: Resolver,
     s: Settings,
+    ruler_budget_s: float = 30.0,
 ) -> dict[str, Any]:
     metas = {m.seq: m for m in selected}
     tracks = {t.id: t for t in reg.tracks}
@@ -524,17 +533,32 @@ def measure_books(
         x1 = max(t.box()[2] for t in same)
         seg_scales.setdefault(ct.segment, {}).setdefault("voice", []).append((x1 - x0) / float(ev["width_cm"]))
     extents = {b["track"]: _spine_extent(tracks[b["track"]], det, reg) for b in read["books"]}
-    resolver.deadline = time.monotonic() + RULER_BUDGET_S  # catalogue height lookups for rulers
+    resolver.deadline = time.monotonic() + min(RULER_BUDGET_S, ruler_budget_s)  # catalogue heights for rulers
+    ruler_h: dict[int, float] = {}
     res_by_track = {r["track"]: r for r in resolved["books"]}
-    for b in read["books"]:
-        r = res_by_track.get(b["track"], {})
-        # Review-level matches may serve as rulers: at least three must agree within 15% (below).
-        if r.get("status") != "identified" or r.get("confidence", 0) < s.id_review:
-            continue
-        h_cm = resolver.catalogue_height_cm(r.get("volume_id", ""), r.get("title", ""), r.get("author", ""))
+    # Review-level matches may serve as rulers: at least three must agree within 15% (below). The catalogue
+    # lookups run in parallel: one after another they did not fit the packet's time budget.
+    candidates = [
+        (b, res_by_track[b["track"]])
+        for b in read["books"]
+        if res_by_track.get(b["track"], {}).get("status") == "identified"
+        and res_by_track[b["track"]].get("confidence", 0) >= s.id_review
+    ]
+    with ThreadPoolExecutor(max_workers=RULER_WORKERS) as pool:
+        heights = list(
+            pool.map(
+                lambda br: resolver.catalogue_height_cm(
+                    br[1].get("volume_id", ""), br[1].get("title", ""), br[1].get("author", ""), br[1].get("url", "")
+                ),
+                candidates,
+            )
+        )
+    for (b, r), h_cm in zip(candidates, heights, strict=True):
         t = tracks[b["track"]]
+        log.info("ruler candidate %s %r: catalogue height %s cm (%s)", t.id, r.get("title"), h_cm, t.orientation)
         if h_cm and 10 <= h_cm <= 45 and t.orientation == "upright":
             seg_scales.setdefault(t.segment, {}).setdefault("rulers", []).append(extents[t.id][0] / h_cm)
+            ruler_h[t.id] = h_cm
 
     scale_report: dict[int, dict[str, Any]] = {}
     for seg, srcs in seg_scales.items():
@@ -551,6 +575,8 @@ def measure_books(
             rep[k] = round(statistics.median(vals), 4)
         scale_report[seg] = rep
 
+    frame_sizes = _frame_ruler_sizes(read, tracks, det, ruler_h, assign_rows(reg))
+
     out: list[dict[str, Any]] = []
     for b in read["books"]:
         t = tracks[b["track"]]
@@ -563,6 +589,11 @@ def measure_books(
         if t.id in xr:
             height, thick = xr[t.id]
             source = "webxr-depth"
+        elif t.id in frame_sizes and "marker" not in rep and "voice" not in rep:
+            # Rulers in the same picture and shelf row: a local scale, so it beats one averaged over a segment
+            # in which the distance to the shelf changes.
+            height, thick = frame_sizes[t.id]
+            source = "catalogue-heights-in-frame"
         else:
             for name in ("marker", "voice", "rulers"):
                 if name in rep:
@@ -573,6 +604,7 @@ def measure_books(
                         "rulers": "catalogue-book-heights",
                     }[name]
                     break
+
         # Cross-check against the other available sources.
         if height is not None:
             for name in ("marker", "voice", "rulers"):
@@ -647,3 +679,60 @@ def measure_books(
     }
     store.write_stage("measure", data)
     return data
+
+
+FRAME_RULER_SPREAD = 0.15  # rulers in one frame row that disagree by more than this (MAD/median) are not used
+
+
+def _frame_ruler_sizes(
+    read: dict[str, Any],
+    tracks: dict[int, Any],
+    det: dict[int, dict[str, Any]],
+    ruler_h: dict[int, float],
+    rows: dict[int, Any],
+) -> dict[int, tuple[float, float]]:
+    """Sizes from rulers in the same frame: a book of known printed height standing in the same shelf row of
+    one picture gives that picture's pixels per centimetre for its neighbours. Unlike the per-segment scale it
+    needs no unbroken tracking, only one identified book next to the others. A ruler book itself is measured
+    from the other rulers in its frames. Each book: median over its frames."""
+    # A book's tracks: its own and those merged into it (the same book seen on another pass).
+    members_of = {
+        int(b["track"]): [int(b["track"]), *[int(m) for m in b.get("merged_tracks", []) if int(m) in tracks]]
+        for b in read["books"]
+    }
+    per_frame: dict[tuple[int, str], list[tuple[int, float]]] = {}
+    for tid, h in ruler_h.items():
+        for m in members_of.get(tid, [tid]):
+            for o in tracks[m].observations:
+                sp = det[o.seq]["spines"][o.index]
+                if not sp["touches_edge"] and m in rows:
+                    per_frame.setdefault((o.seq, rows[m].label), []).append((tid, float(sp["length"]) / h))
+    sizes: dict[int, tuple[float, float]] = {}
+    for b in read["books"]:
+        tid = int(b["track"])
+        if tracks[tid].orientation != "upright":
+            continue
+        members = members_of[tid]
+        hs, ws = [], []
+        for m in members:
+            if m not in rows:
+                continue
+            for o in tracks[m].observations:
+                sp = det[o.seq]["spines"][o.index]
+                if sp["touches_edge"]:
+                    continue
+                scales = [v for r, v in per_frame.get((o.seq, rows[m].label), []) if r != tid]
+                if not scales:
+                    continue
+                med = statistics.median(scales)
+                if len(scales) >= 2 and statistics.median(abs(v - med) for v in scales) / med > FRAME_RULER_SPREAD:
+                    continue
+                hs.append(float(sp["length"]) / med)
+                ws.append(float(sp["width"]) / med)
+        if hs:
+            # Width as in the per-segment measure: a low percentile, since mask edges bleed into neighbours.
+            # Median height over the frames (a higher percentile was tried and measured worse on 2 of 4 sweeps).
+            # Width from a low percentile: mask edges bleed into neighbours, never shrink.
+            sizes[tid] = (statistics.median(hs), float(np.percentile(ws, WIDTH_PERCENTILE)))
+    log.info("in-frame rulers sized %s books (%s rulers)", len(sizes), len(ruler_h))
+    return sizes

@@ -116,7 +116,9 @@ def canonical(answer: str) -> tuple[str, str, bool] | None:
     return answer, "other", False
 
 
-def name_items(items: list[dict[str, Any]], images: dict[int, np.ndarray]) -> list[dict[str, Any]]:
+def name_items(
+    items: list[dict[str, Any]], images: dict[int, np.ndarray], budget_s: float = BUDGET_S
+) -> list[dict[str, Any]]:
     """Renames items in place from the model's answers; returns the items removed as building fixtures."""
     jobs: list[tuple[dict[str, Any], np.ndarray]] = []
     for it in items:
@@ -129,7 +131,7 @@ def name_items(items: list[dict[str, Any]], images: dict[int, np.ndarray]) -> li
         if crop.size and min(crop.shape[:2]) >= 24:
             jobs.append((it, crop))
     removed: list[dict[str, Any]] = []
-    deadline = time.monotonic() + BUDGET_S
+    deadline = time.monotonic() + min(BUDGET_S, budget_s)
     batch = GRID * GRID
     for start in range(0, len(jobs), batch):
         if time.monotonic() > deadline:
@@ -147,6 +149,11 @@ def name_items(items: list[dict[str, Any]], images: dict[int, np.ndarray]) -> li
             if named is None:
                 continue
             label, category, fixture = named
+            if fixture and category == "book" and it.get("room_step"):
+                # Shown while panning the room, not the shelves: an object called "book" here is a misnaming
+                # (a water bottle seen next to the shelf); the detector's name stays.
+                it["vision_check"] = f"{answer} (ignored: room part of the walk)"
+                continue
             if fixture:  # a part of the building, or a book (counted in the book list)
                 items.remove(it)
                 removed.append({"id": it["id"], "detector_label": it["label"], "seen_as": label})

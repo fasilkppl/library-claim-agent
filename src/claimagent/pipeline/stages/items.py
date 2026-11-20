@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import statistics
 from typing import Any
 
@@ -16,16 +17,63 @@ from claimagent.pipeline.household import CATEGORY
 from claimagent.pipeline.register import Registrar
 from claimagent.pipeline.stages.common import camera_of
 
+log = logging.getLogger(__name__)
+
 # ============================================================================ items
-SINGLE_SIGHTING_MIN_CONF = 0.6
-EDGE_FRAGMENT_MIN_CONF = 0.8
+# Recall first: in a continuous pan most objects are seen in one or two analysed frames, at low detector
+# confidence and often under the wrong name (an iron called "mouse"). Every kept item is named again by the vision
+# model, which also removes building parts, so the detector only has to find candidates. Measured on three real
+# sweeps: items found 2/6/11 of 18 -> 6/7/15 of 18 with these values (previously 0.25 / 0.6 / 0.8).
+SINGLE_SIGHTING_MIN_CONF = 0.35
+EDGE_FRAGMENT_MIN_CONF = 0.6
 DEDUPE_RADIUS_M = {"shelving": 1.0, "seating": 0.7, "table": 0.8, "rug": 1.2}
-MIN_CONF = 0.25
+MIN_CONF = 0.15
+
+
+def guided_items(store: SweepStore) -> list[dict[str, Any]]:
+    """Items confirmed one at a time by the guide: exactly one entry each, in the order shown."""
+    frames = {m.seq: m for m in store.frames()}
+    out: list[dict[str, Any]] = []
+    for ev in store.events("guide_item"):
+        seq = int(ev["seqs"][-1])  # the frame the item was confirmed on; the box is from that frame
+        if seq not in frames:
+            continue
+        label = str(ev["label"])
+        out.append(
+            {
+                "id": f"I{len(out) + 1:03d}",
+                "label": label,
+                "category": CATEGORY.get(label, "other"),
+                "frame_ref": frames[seq].frame_ref,
+                "frame_seq": seq,
+                "bbox": ev["bbox"],
+                "dims_cm": None,
+                "text": [],
+                "observations": len(ev["seqs"]),
+                "confidence": float(ev.get("conf", 0.5)),
+                "world": None,
+                "guided": int(ev["n"]),
+                "forced": bool(ev.get("forced", False)),
+            }
+        )
+    return out
 
 
 def collect_items(
-    store: SweepStore, reg: Registrar, det: dict[int, dict[str, Any]], selected: list[FrameMeta]
+    store: SweepStore,
+    reg: Registrar,
+    det: dict[int, dict[str, Any]],
+    selected: list[FrameMeta],
+    vlm_budget_s: float = vlm.BUDGET_S,
 ) -> dict[str, Any]:
+    guided = guided_items(store)
+    if guided:
+        # A guided sweep: the items shown one by one are the items. Detections elsewhere (a pan in the corner
+        # of a shelf frame, the same bucket seen again) are not added, so nothing is counted twice.
+        log.info("items: %s confirmed by the guide", len(guided))
+        return _finish_items(
+            store, guided, {m.seq: m for m in store.frames()}, observations=len(guided), vlm_budget_s=vlm_budget_s
+        )
     metas = {m.seq: m for m in selected}
     obs = []
     for m in selected:
@@ -92,17 +140,34 @@ def collect_items(
                 "observations": len(c),
                 "confidence": round(conf, 2),
                 "world": best["world"],
+                "seqs": sorted({e["seq"] for e in c}),
+                "boxes": {str(e["seq"]): list(e["bbox"]) for e in c},
             }
         )
+    return _finish_items(store, items, metas, observations=len(obs), vlm_budget_s=vlm_budget_s)
+
+
+def _finish_items(
+    store: SweepStore,
+    items: list[dict[str, Any]],
+    metas: dict[int, FrameMeta],
+    observations: int,
+    vlm_budget_s: float = vlm.BUDGET_S,
+) -> dict[str, Any]:
+    """Names each item from its picture (vision model) and removes building fixtures and books."""
     removed: list[dict[str, Any]] = []
+    for it in items:
+        m = metas.get(it["frame_seq"])
+        it["room_step"] = bool(m is not None and (m.extra or {}).get("step") == "room")
     if get_settings().item_vision_check and items:
         images = {}
         for it in items:
             img = cv2.imread(str(store.frame_path(metas[it["frame_seq"]])))
             if img is not None:
                 images[it["frame_seq"]] = img
-        removed = vlm.name_items(items, images)
-    data = {"items": items, "observations": len(obs), "removed_fixtures": removed}
+        removed = vlm.name_items(items, images, vlm_budget_s)
+    merged = _drop_repeats(store, items, metas)
+    data = {"items": items, "observations": observations, "removed_fixtures": removed, "merged_repeats": merged}
     store.write_stage("items", data)
     return data
 
@@ -162,3 +227,92 @@ def _item_clusters(
             clusters.append(list(c))
             centres.append(centre)
     return clusters
+
+
+# Colour-histogram correlation at which two items of the same name are one object seen again (measured on a real
+# sweep: the same box from other angles 0.57-0.99, different objects at most 0.33).
+SAME_ITEM_HIST = 0.5
+SEPARATE_IOU = 0.1  # boxes in one picture overlapping less than this are two different objects
+
+
+def _item_hist(img: np.ndarray, bbox: list[float]) -> np.ndarray | None:
+    x0, y0, x1, y1 = (int(v) for v in bbox)
+    crop = img[max(0, y0) : y1, max(0, x0) : x1]
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h = cv2.calcHist([hsv], [0, 1], None, [30, 32], [0, 180, 0, 256])
+    out: np.ndarray = cv2.normalize(h, h).flatten()
+    return out
+
+
+def _drop_repeats(store: SweepStore, items: list[dict[str, Any]], metas: dict[int, FrameMeta]) -> list[dict[str, Any]]:
+    """Final check: no object listed twice. Two entries with the same final name and the same look are one
+    object seen twice; the better-seen entry is kept and the merge is recorded."""
+    hists: dict[str, np.ndarray | None] = {}
+    for it in items:
+        m = metas.get(it["frame_seq"])
+        img = cv2.imread(str(store.frame_path(m))) if m is not None else None
+        hists[it["id"]] = _item_hist(img, it["bbox"]) if img is not None else None
+    merged: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for it in sorted(items, key=lambda x: -x["observations"]):
+        twin = None
+        for k in kept:
+            if k["label"] != it["label"]:
+                continue
+            if "seqs" in it and "seqs" in k:
+                # Two objects in one picture are two objects; the same name seen at different moments of the
+                # walk is one object seen again (unless its colours clearly differ while both are in view).
+                together = set(it["seqs"]) & set(k["seqs"])
+                # In a shared picture they are two objects only if they sit in different places; boxes that
+                # overlap there are one object detected twice.
+                apart = [
+                    seq
+                    for seq in together
+                    if _box_iou(it["boxes"].get(str(seq), []), k["boxes"].get(str(seq), [])) < SEPARATE_IOU
+                ]
+                ha, hb = hists[k["id"]], hists[it["id"]]
+                looks_same = (
+                    ha is not None
+                    and hb is not None
+                    and float(cv2.compareHist(ha, hb, cv2.HISTCMP_CORREL)) >= SAME_ITEM_HIST
+                )
+                if not apart or looks_same:
+                    twin = k
+                    break
+                continue
+            if "guided" in it and "guided" in k:
+                # Shown one by one: the same name is the same object shown again, unless the policyholder said it
+                # is a different one when it was recorded.
+                if not (it.get("forced") or k.get("forced")):
+                    twin = k
+                    break
+                continue
+            ha, hb = hists[k["id"]], hists[it["id"]]
+            if (
+                ha is not None
+                and hb is not None
+                and float(cv2.compareHist(ha, hb, cv2.HISTCMP_CORREL)) >= SAME_ITEM_HIST
+            ):
+                twin = k
+                break
+        if twin is None:
+            kept.append(it)
+            continue
+        twin["observations"] += it["observations"]
+        merged.append({"kept": twin["id"], "merged": it["id"], "label": it["label"]})
+        log.info("ITEMS repeat: %s is the same %s as %s", it["id"], it["label"], twin["id"])
+    keep_ids = {k["id"] for k in kept}
+    items[:] = [it for it in items if it["id"] in keep_ids]
+    return merged
+
+
+def _box_iou(a: list[float], b: list[float]) -> float:
+    if len(a) != 4 or len(b) != 4:
+        return 0.0
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0

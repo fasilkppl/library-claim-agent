@@ -14,6 +14,7 @@ from claimagent.contract import ClaimPacket
 from claimagent.pipeline import stages
 from claimagent.pipeline.analyze import FrameAnalyzer
 from claimagent.pipeline.assemble import price_and_assemble
+from claimagent.pipeline.dedupe import dedupe_books, duplicate_pairs
 from claimagent.pipeline.http import CachedHttp
 from claimagent.pipeline.price.engine import PriceEngine
 from claimagent.pipeline.price.sources import (
@@ -24,6 +25,7 @@ from claimagent.pipeline.price.sources import (
     SerperShopping,
 )
 from claimagent.pipeline.resolve import Resolver
+from claimagent.pipeline.verify import verify_books
 from claimagent.report.pdf import html_to_pdf
 from claimagent.report.render import render_report
 
@@ -40,6 +42,60 @@ def build_engine(http: CachedHttp, s: Settings) -> PriceEngine:
         Frankfurter(http),
         GoogleBooksSale(http, s.google_books_key),
     )
+
+
+# Target: the packet about 3.5 minutes after the sweep (the brief allows 5). Measured on real sweeps: registration
+# 25-38 s, reading 12 s, items 15-37 s, prices 12-35 s, report 5 s; the rest goes to frame analysis and lookups.
+PACKET_BUDGET_S = 200.0
+RESERVE_AFTER_ANALYZE = 145.0  # registration, reading, title lookups, rulers, items, prices and the report
+RESERVE_AFTER_RESOLVE = 80.0  # rulers, items, prices and the report after the title lookups
+RESERVE_AFTER_VERIFY = 70.0  # rulers, items, prices and the report after the author check
+RESERVE_AFTER_RULERS = 65.0
+RESERVE_AFTER_ITEMS = 40.0
+
+
+def _left(t0: float, reserve: float, floor: float, cap: float) -> float:
+    """Seconds a stage may spend: what remains of the packet budget after the later stages' reserve."""
+    left = PACKET_BUDGET_S - (time.perf_counter() - t0) - reserve
+    budget = max(floor, min(cap, left))
+    log.info("time budget: %.0f s left after reserve %.0f s -> stage gets %.0f s", left, reserve, budget)
+    return budget
+
+
+def books_only(det: dict[int, dict[str, Any]], frames: dict[int, Any]) -> dict[int, dict[str, Any]]:
+    """In a guided sweep, spines count only in frames taken while the guide was on the books: a glance at the
+    shelf while showing an item or the room would add the same books again."""
+    guided = any((m.extra or {}).get("step") for m in frames.values())
+    if not guided:
+        return det
+    out = {}
+    for seq, d in det.items():
+        step_name = (frames[seq].extra or {}).get("step") if seq in frames else None
+        out[seq] = d if step_name in (None, "books") else {**d, "spines": [], "text_lines": []}
+    dropped = sum(1 for seq in det if out[seq] is not det[seq])
+    log.info("guided sweep: spines ignored in %s frames taken outside the books step", dropped)
+    return out
+
+
+def _verify(
+    store: SweepStore, read: dict[str, Any], resolved: dict[str, Any], resolver: Resolver, budget_s: float
+) -> dict[str, Any]:
+    """Second-catalogue check of each identified book's authors (disagreements go to the review queue)."""
+    checked, report = verify_books(read, resolved, resolver, budget_s)
+    store.write_stage("verify", report)
+    return checked
+
+
+def _dedupe(
+    store: SweepStore, read: dict[str, Any], resolved: dict[str, Any], boxes: dict[int, dict[int, Any]]
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """One entry per physical book; the check after it must find no pair left."""
+    read2, resolved2, report = dedupe_books(read, resolved, boxes)
+    report["duplicates_left"] = duplicate_pairs(read2, resolved2, boxes)
+    if report["duplicates_left"]:
+        log.error("duplicate books left after dedupe: %s", report["duplicates_left"])
+    store.write_stage("dedupe", report)
+    return read2, resolved2
 
 
 def run_pipeline(
@@ -78,13 +134,32 @@ def run_pipeline(
             selected,
             frame_analyzer,
             (lambda i, n: progress("analyze", {"done": i, "total": n})) if progress else None,
+            _left(t_all, RESERVE_AFTER_ANALYZE, 20, 60),
         ),
     )
-    reg, _ = step("register", lambda: stages.register_tracks(store, selected, det))
-    read = step("read", lambda: stages.read_tracks(store, reg, det, selected, frame_analyzer.models.reader))
-    resolved = step("resolve", lambda: stages.resolve_books(store, read, resolver, s))
-    measured = step("measure", lambda: stages.measure_books(store, reg, det, selected, read, resolved, resolver, s))
-    items = step("items", lambda: stages.collect_items(store, reg, det, selected))
+    selected = [m for m in selected if m.seq in det]  # frames left unanalysed (time budget) are not used
+    det_books = books_only(det, frames)
+    reg, _ = step("register", lambda: stages.register_tracks(store, selected, det_books))
+    read = step("read", lambda: stages.read_tracks(store, reg, det_books, selected, frame_analyzer.models.reader))
+    # One time budget for the packet: the slow lookups get what is left, so the packet is always due in time.
+    resolved = step(
+        "resolve", lambda: stages.resolve_books(store, read, resolver, s, _left(t_all, RESERVE_AFTER_RESOLVE, 20, 70))
+    )
+    # Where each spine was in each frame: two spines side by side in one frame are two books.
+    boxes = {t.id: {o.seq: o.corners.tolist() for o in t.observations} for t in reg.tracks}
+    read, resolved = step("dedupe", lambda: _dedupe(store, read, resolved, boxes))
+    resolved = step(
+        "verify", lambda: _verify(store, read, resolved, resolver, _left(t_all, RESERVE_AFTER_VERIFY, 5, 15))
+    )
+    measured = step(
+        "measure",
+        lambda: stages.measure_books(
+            store, reg, det_books, selected, read, resolved, resolver, s, _left(t_all, RESERVE_AFTER_RULERS, 5, 20)
+        ),
+    )
+    items = step(
+        "items", lambda: stages.collect_items(store, reg, det, selected, _left(t_all, RESERVE_AFTER_ITEMS, 10, 30))
+    )
     room = step("room", lambda: stages.measure_room(store, list(frames.values()), items, tracking))
 
     session = store.read_session()
