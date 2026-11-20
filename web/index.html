@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#dbe7ff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b1a3a" media="(prefers-color-scheme: dark)">
+<meta name="description" content="Walk your home library once; get a priced, measured contents-claim packet.">
+<title>Library Claim</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/web/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/web/icons/icon-192.png">
+<link rel="stylesheet" href="/web/styles.css">
+</head>
+<body>
+<div id="overlay">
+  <header class="bar">
+    <div class="title"><b>Library Claim</b> <span id="sweepId" class="muted small"></span></div>
+    <div class="chips-row">
+      <span id="arChip" class="chip" hidden>AR</span>
+      <span id="locale" class="chip">—</span>
+      <span id="conn" class="dot" title="Not connected"></span>
+    </div>
+  </header>
+
+  <ol id="steps" class="steps" aria-label="Progress">
+    <li data-step="connect" class="active">Connect</li>
+    <li data-step="sweep">Sweep</li>
+    <li data-step="packet">Packet</li>
+  </ol>
+
+  <section class="card" id="actions">
+    <p id="status" class="status">Tap Connect and allow the microphone. The agent will greet you.</p>
+    <div class="row">
+      <button id="btnConnect" class="primary">Connect &amp; talk</button>
+      <button id="btnAR" class="primary" hidden disabled>Start AR sweep</button>
+      <button id="btnCam" hidden disabled>Camera-only sweep</button>
+      <button id="btnStop" class="danger" hidden disabled>Finish sweep</button>
+    </div>
+    <details id="options">
+      <summary>Options</summary>
+      <label class="small"><input type="checkbox" id="chkMarker"> I placed the 10 cm reference marker (camera-only sweep)</label>
+      <button id="btnInstall" class="small" hidden>Install as app</button>
+    </details>
+  </section>
+
+  <section id="hint" class="hint" role="status" aria-live="polite" hidden></section>
+
+  <section id="counts" class="tiles" aria-label="Live counts">
+    <div><b id="nBooks">0</b><span>spines</span></div>
+    <div><b id="nReadable">0</b><span>readable</span></div>
+    <div><b id="nIdentified">0</b><span>identified</span></div>
+    <div><b id="nItems">0</b><span>items</span></div>
+    <div><b id="tElapsed">0</b><span>seconds</span></div>
+  </section>
+
+  <section id="packet" class="card result" hidden></section>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="inventory" aria-selected="true">Inventory</button>
+    <button role="tab" data-tab="talk" aria-selected="false">Conversation</button>
+  </nav>
+  <div id="panels">
+    <section id="tab-inventory" class="card panel" role="tabpanel">
+      <h3>Inventory <span class="muted small">(live)</span></h3>
+      <ul id="items" class="chips"></ul>
+      <ol id="books"></ol>
+      <p id="emptyInv" class="muted small">Books and items appear here as the camera sees them.</p>
+    </section>
+    <section id="tab-talk" class="card panel" role="tabpanel">
+      <h3>Conversation</h3>
+      <div id="log" aria-live="polite"></div>
+      <form id="typed"><input id="typedText" placeholder="Type instead of speaking…" autocomplete="off" aria-label="Message"><button>Send</button></form>
+    </section>
+  </div>
+</div>
+<video id="video" playsinline muted hidden></video>
+<canvas id="canvas" hidden></canvas>
+<script src="/web/app.js" type="module"></script>
+</body>
+</html>

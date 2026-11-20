@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Screen Ruler</title>
+<style>
+:root{--fg:#111;--bg:#fff;--muted:#666;--accent:#0a84ff}
+@media (prefers-color-scheme:dark){:root{--fg:#f2f2f2;--bg:#111;--muted:#999}}
+body{margin:0;font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:var(--fg);background:var(--bg);padding:16px}
+h1{font-size:20px;margin:0 0 8px}p{margin:6px 0;max-width:760px}.muted{color:var(--muted)}
+#card{border:2px solid var(--accent);border-radius:12px;height:0;margin:14px 0;box-sizing:content-box}
+.ctl{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button{font:inherit;padding:8px 14px;border-radius:999px;border:1px solid var(--accent);background:transparent;color:var(--accent);cursor:pointer}
+input[type=range]{width:min(520px,90vw)}
+#ruler{position:relative;height:90px;border-bottom:2px solid var(--fg);margin:28px 0 8px;overflow:hidden;white-space:nowrap}
+.t{position:absolute;bottom:0;width:1px;background:var(--fg)}
+.n{position:absolute;bottom:46px;font-size:13px;transform:translateX(-50%)}
+</style>
+</head>
+<body>
+<h1>Screen ruler</h1>
+<p><b>Step 1, calibrate:</b> lay any bank card (debit, credit or PVC Aadhaar: all exactly 8.56 cm wide) flat on the
+screen, its left edge on the left edge of the blue box. Move the slider until the box is exactly as wide as the card.</p>
+<div class="ctl">
+  <button id="minus">−</button>
+  <input type="range" id="slider" min="200" max="900" step="0.5">
+  <button id="plus">+</button>
+  <span id="info" class="muted"></span>
+</div>
+<div id="card"></div>
+<p><b>Step 2, measure:</b> hold the book against the screen with its end on <b>0</b> and read the other end.
+Long ticks every cm, short ticks every mm.</p>
+<div id="ruler"></div>
+<p class="muted">Keep the browser zoom at 100% (Cmd+0). The calibration is remembered on this computer.</p>
+<script>
+const CARD_MM = 85.6;
+const slider = document.getElementById("slider"), card = document.getElementById("card");
+const ruler = document.getElementById("ruler"), info = document.getElementById("info");
+let saved = null;
+try { saved = parseFloat(localStorage.getItem("cardPx")); } catch {}
+slider.value = saved || 323;
+function draw() {
+  const cardPx = parseFloat(slider.value), pxPerMm = cardPx / CARD_MM;
+  try { localStorage.setItem("cardPx", String(cardPx)); } catch {}
+  card.style.width = cardPx + "px"; card.style.height = (53.98 * pxPerMm) + "px";
+  info.textContent = `${pxPerMm.toFixed(3)} px per mm`;
+  const mm = Math.floor((ruler.clientWidth - 4) / pxPerMm);
+  let html = "";
+  for (let i = 0; i <= mm; i++) {
+    const x = 2 + i * pxPerMm, h = i % 10 === 0 ? 40 : i % 5 === 0 ? 26 : 14;
+    html += `<div class="t" style="left:${x}px;height:${h}px"></div>`;
+    if (i % 10 === 0) html += `<div class="n" style="left:${x}px">${i / 10}</div>`;
+  }
+  ruler.innerHTML = html;
+}
+slider.oninput = draw;
+document.getElementById("minus").onclick = () => { slider.value = parseFloat(slider.value) - 0.5; draw(); };
+document.getElementById("plus").onclick = () => { slider.value = parseFloat(slider.value) + 0.5; draw(); };
+window.onresize = draw;
+draw();
+</script>
+</body>
+</html>
