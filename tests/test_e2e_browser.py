@@ -88,6 +88,9 @@ def test_live_sweep_end_to_end(tmp_path: Path) -> None:
         # Sweep for ~75 s so the recorded speech (locale, skip, print, question) is heard during capture.
         page.wait_for_timeout(75_000)
         n_live = int(page.inner_text("#nBooks"))
+        # The sweep as the brief describes it: shelves, then the room in the same pass, then "I'm done" (Finish).
+        page.click("#guideActions button:has-text('Books done')")
+        page.wait_for_timeout(5_000)
         page.click("#btnStop")
         t_stop = time.time()
         page.wait_for_selector("#packet:not([hidden])", timeout=300_000)
@@ -111,6 +114,8 @@ def test_live_sweep_end_to_end(tmp_path: Path) -> None:
             indent=2,
         )
     )
+    guide_steps = [e.get("step") for e in events if e.get("type") == "guide"]
+    assert guide_steps[:1] == ["books"] and "room" in guide_steps, f"sweep flow not followed: {guide_steps}"
     assert "agent_text" in kinds, "agent never spoke"
     assert n_live > 0, "inventory did not fill during the sweep"
     assert user, "no speech recognised from the microphone"

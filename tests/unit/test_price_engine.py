@@ -192,3 +192,23 @@ def test_unknown_dollar_is_not_local_currency():
     assert currency_of("CA$24.99") == "CAD"
     assert currency_of("R$ 20,00") == "?"
     assert currency_of("$12.00") == "USD"
+
+
+def test_item_listings_must_be_the_product_itself():
+    from claimagent.pipeline.price.engine import item_offer_matches
+
+    ok = lambda t, q="pressure cooker": item_offer_matches(offer(t, 1500), q)  # noqa: E731
+    assert ok("Prestige Popular Svachh Pressure Cooker")
+    assert not ok("The Indus Valley 3L+5L Tri-ply Pressure Cooker Combo")
+    assert not ok("Whistle for Pressure Cooker")
+    assert not ok("Prestige Svachh Aluminium Deep Pressure Pan")
+    assert ok("Princeware Super Deluxe Blue Plastic Bucket 16 L", "bucket")
+    assert not ok("Kuber Industries Pack Of 2 Multi-purpose Small Bucket", "bucket")
+
+
+def test_printed_text_is_a_brand_only_when_it_reads_as_words():
+    from claimagent.pipeline.assemble import _reads_as_words
+
+    assert _reads_as_words("CRACKER SHAPE CHOCO BITES")
+    assert not _reads_as_words("12 8bun ong")
+    assert not _reads_as_words("C perch serch youeг")

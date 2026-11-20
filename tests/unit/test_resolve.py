@@ -92,3 +92,23 @@ def test_sequel_is_not_the_same_work():
     assert same_work("The Almanack of Naval Ravikant", "The Almanack of Naval Ravikant: A Guide to Wealth")
     assert same_work("ReWork", "Rework")
     assert not same_work("Dune Messiah", "Dune")
+
+
+def test_books_about_a_book_are_not_the_book():
+    from claimagent.pipeline.resolve import derivative, same_work
+
+    trivia = Candidate(
+        title="And the Mountains Echoed by Khaled Hosseini",
+        authors=["Trivia-on-Books Staff", "And the Mountains Echoed"],
+    )
+    novel = Candidate(title="And the Mountains Echoed", authors=["Khaled Hosseini"])
+    own_by = Candidate(title="Go Set a Watchman by Harper Lee", authors=["Harper Lee"])
+    assert derivative(trivia) and not derivative(novel) and not derivative(own_by)
+    assert same_work("Go Set a Watchman by Harper Lee", "Go Set a Watchman")
+
+
+def test_study_notes_are_not_the_book():
+    from claimagent.pipeline.resolve import derivative
+
+    assert derivative(Candidate(title="Charles Dickens: A Tale of Two Cities: Notes", authors=["George Taylor"]))
+    assert not derivative(Candidate(title="Notes from Underground", authors=["Fyodor Dostoyevsky"]))

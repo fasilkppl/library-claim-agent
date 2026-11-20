@@ -66,3 +66,16 @@ def test_a_short_pause_does_not_cut_the_sentence():
 def test_noise_that_barely_triggers_the_vad_has_a_low_speech_ratio():
     seg, events = feed([0.7] * 4 + [0.4, 0.2] * 20 + [0.1] * 35)
     assert events == ["start", "end"] and seg.last_speech_ratio < 0.35
+
+
+def test_non_english_letters_are_noise():
+    from claimagent.live.voice import invented_reason
+
+    class Seg:
+        def __init__(self, t):
+            self.text, self.avg_logprob, self.compression_ratio, self.no_speech_prob = t, -0.3, 1.0, 0.1
+
+    noise = "Hél hér, Gúl, Þjón, Vatnsæl, Æsjó, Þjó, Þjó, Þjó."
+    assert invented_reason(noise, [Seg(noise)], set(), "", 0.7).startswith("not English")
+    ok = "Books are done. Now I'm moving on to other items."
+    assert invented_reason(ok, [Seg(ok)], set(), "", 0.7) == ""
