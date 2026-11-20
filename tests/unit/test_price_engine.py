@@ -207,7 +207,13 @@ def test_item_listings_must_be_the_product_itself():
 
 
 def test_printed_text_is_a_brand_only_when_it_reads_as_words():
+    import pytest
+
     from claimagent.pipeline.assemble import _reads_as_words
+    from claimagent.pipeline.resolve import english_words
+
+    if not english_words():
+        pytest.skip("no system word list (/usr/share/dict/words) on this machine")
 
     assert _reads_as_words("CRACKER SHAPE CHOCO BITES")
     assert not _reads_as_words("12 8bun ong")
