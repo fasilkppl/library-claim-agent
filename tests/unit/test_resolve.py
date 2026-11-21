@@ -197,3 +197,25 @@ def test_a_first_name_glued_to_the_surname_still_names_the_author() -> None:
     spanish, _ = score(spine, Candidate("El Almanaque de Naval Ravikant", []))
     assert parts["author_hit"] == 1.0 and not parts["unexplained"]
     assert english > spanish  # the two used to tie, and the translation was listed first
+
+
+def test_thickness_from_the_work_found_by_title_when_the_matched_record_has_no_page_count():
+    from claimagent.pipeline.resolve import Resolver
+
+    class _Resp:
+        def __init__(self, data, status=200):
+            self.data, self.status = data, status
+
+    class _Http:
+        def get(self, url, params, source=""):
+            if "googleapis" in url:
+                return _Resp({"volumeInfo": {"title": "The Lost Symbol"}})  # no page count, no size
+            if url.endswith("search.json"):
+                assert params["title"] == "The Lost Symbol" and params["author"] == "brown"
+                return _Resp(
+                    {"docs": [{"key": "/works/OL5W", "title": "The Lost Symbol", "number_of_pages_median": 604}]}
+                )
+            return _Resp({"entries": [{"number_of_pages": 509}, {"number_of_pages": 639}, {"number_of_pages": 670}]})
+
+    got = Resolver(_Http()).catalogue_thickness_cm("VOL1", title="The Lost Symbol", author="Dan Brown")
+    assert got == (3.8, "639 pages (median of 3 Open Library editions)")

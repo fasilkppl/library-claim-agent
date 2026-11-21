@@ -512,9 +512,20 @@ RESOLVE_BUDGET_S = 100.0  # the packet is due within 5 minutes of the sweep
 HARD_STOP_GRACE_S = 10.0
 RULER_BUDGET_S = 30.0
 RULER_WORKERS = 6
-# An identified book's photo thickness further than this from its catalogue thickness gives way to the catalogue:
-# thin spines are a few pixels wide and their outlines spill onto neighbours (Patterns, 0.6 cm, measured 3.0).
-THICK_DISAGREE = 0.25
+# Photo and page-count thickness err in opposite directions: the photo outline takes in a strip of cover or a
+# neighbour's edge (too wide), the page count assumes thin paper (most Indian paperbacks are bulkier). Both
+# errors are proportional, so the two are combined as a geometric mean. A photo more than twice or under half
+# the page-count figure is a wrong outline (two spines merged, or a fragment): the page count alone is used.
+THICK_RATIO_MAX = 2.0
+
+
+def fuse_thickness(photo: float | None, catalogue: tuple[float, str]) -> tuple[float, str]:
+    """One thickness from the photo and the page-count estimate (see THICK_RATIO_MAX), with the reason."""
+    cat, where = catalogue
+    if photo is None or not 1 / THICK_RATIO_MAX <= photo / cat <= THICK_RATIO_MAX:
+        measured = "none" if photo is None else f"{photo:.1f} cm"
+        return cat, f"thickness from the catalogue ({where}); the photo gave {measured}"
+    return (photo * cat) ** 0.5, f"thickness: photo {photo:.1f} cm and catalogue {cat:.1f} cm ({where}) combined"
 
 
 def holds_spine(reading: str, spines: list[str]) -> bool:
@@ -647,7 +658,12 @@ def measure_books(
             r.get("volume_id", ""), r.get("title", ""), r.get("author", ""), r.get("url", "")
         )
         return h, resolver.catalogue_thickness_cm(
-            r.get("volume_id", ""), r.get("url", ""), check_deadline=False, pages_hint=r.get("pages")
+            r.get("volume_id", ""),
+            r.get("url", ""),
+            check_deadline=False,
+            pages_hint=r.get("pages"),
+            title=r.get("title", ""),
+            author=r.get("author", ""),
         )
 
     with ThreadPoolExecutor(max_workers=RULER_WORKERS) as pool:
@@ -731,12 +747,8 @@ def measure_books(
         cat = thick_cat.get(t.id)
         photo_thick = thick
         if cat is not None:
-            if thick is None or abs(thick - cat[0]) / cat[0] > THICK_DISAGREE:
-                measured = "none" if thick is None else f"{thick:.1f} cm"
-                checks.append(f"thickness from the catalogue ({cat[1]}); the photo gave {measured}")
-                thick = cat[0]
-            else:
-                thick = (thick + cat[0]) / 2  # two independent estimates that agree: their mean
+            thick, why = fuse_thickness(thick, cat)
+            checks.append(why)
         if b["only_partial"]:
             checks.append("spine only seen cut off at the frame edge; size is a lower bound")
         out.append(

@@ -673,7 +673,13 @@ class Resolver:
         return None
 
     def catalogue_thickness_cm(
-        self, volume_id: str, work_url: str = "", check_deadline: bool = True, pages_hint: int | None = None
+        self,
+        volume_id: str,
+        work_url: str = "",
+        check_deadline: bool = True,
+        pages_hint: int | None = None,
+        title: str = "",
+        author: str = "",
     ) -> tuple[float, str] | None:
         """(thickness, where it comes from), estimated from the page count as printers size a spine (PAGE_CM a page
         plus the covers): the matched Google Books volume first, else the editions Open Library lists for the work.
@@ -685,7 +691,33 @@ class Resolver:
             got = self._openlibrary_thickness(work_url)
         if got is None and pages_hint and 40 <= pages_hint <= 1500:
             got = round(pages_hint * PAGE_CM + COVER_CM, 1), f"{pages_hint} pages (catalogue search record)"
+        if got is None and title:  # the matched record has no page count: the work found by title and author
+            got = self._openlibrary_search_thickness(title, author)
         return got
+
+    def _openlibrary_search_thickness(self, title: str, author: str) -> tuple[float, str] | None:
+        """The work found by title and author on Open Library: the median page count of its editions (with
+        hardcover boards when most are hardcover), else the median the search itself reports."""
+        main = re.sub(r"\s+by\s+.*$", "", title.split(":")[0], flags=re.I).strip()
+        surname = (content_tokens(author.split(",")[0]) or [""])[-1]
+        params = {"title": main, "fields": "key,title,number_of_pages_median", "limit": 3}
+        if surname:
+            params["author"] = surname
+        try:
+            r = self.http.get("https://openlibrary.org/search.json", params, source="openlibrary")
+        except (RuntimeError, LookupError):
+            return None
+        for d in (r.data or {}).get("docs", []) if r.status < 400 else []:
+            if not same_work(str(d.get("title", "")), main):
+                continue
+            key = str(d.get("key", ""))
+            got = self._openlibrary_thickness(f"https://openlibrary.org{key}") if key.startswith("/works/") else None
+            n = d.get("number_of_pages_median")
+            if got is None and isinstance(n, int) and 40 <= n <= 1500:
+                got = round(n * PAGE_CM + COVER_CM, 1), f"{n} pages (median of the work's Open Library editions)"
+            if got is not None:
+                return got
+        return None
 
     def _openlibrary_thickness(self, work_url: str) -> tuple[float, str] | None:
         """Median page count over the work's editions; hardcover covers when most of those editions are hardcover."""
