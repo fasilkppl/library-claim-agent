@@ -432,7 +432,14 @@ class Resolver:
             variants.append(" ".join(f"{w[:-1]}*" for w in long_words))
         # Only the spine's dictionary words ("WINGS OF FIRE An Autobiegraphy | APJADdul" -> "wings fire"): every
         # query above keeps a misread long word, which a catalogue matching whole words does not find.
-        plain = [w for w in content_tokens(ocr_clean(spine_text)) if w in english_words() and len(w) >= 3]
+        words = english_words()
+        plain = []
+        for w in content_tokens(spine_text):
+            if w in words or (w.endswith("s") and w[:-1] in words):  # as printed: the word list has no plurals
+                plain.append(w)
+            elif len(w) >= MISREAD_MIN_LEN and (fixed := _closest_word(w)):  # a misread long word, repaired
+                plain.append(fixed)
+        plain = [w for w in plain if len(w) >= 3]
         if len(plain) >= 2:
             variants.append(" ".join(plain[:5]))
         # OCR misreads one letter in a word ("nacb" for "nach") and every query above contains it:
