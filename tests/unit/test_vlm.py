@@ -31,3 +31,35 @@ def test_a_building_word_in_front_of_a_contents_word_keeps_the_item():
     fixtures = ("light switch", "wall socket", "kitchen sink", "plug point", "floor", "door", "wall", "door handle")
     for fixture in fixtures:
         assert canonical(fixture)[2] is True, fixture
+
+
+def test_a_spine_copy_keeps_printed_lines_and_drops_refusals():
+    from claimagent.pipeline.vlm import spine_lines
+
+    assert spine_lines("A TALE OF\nTWO CITIES") == "A TALE OF | TWO CITIES"
+    assert spine_lines("**CHARLES**\nDICKENS") == "CHARLES | DICKENS"
+    assert spine_lines("NONE") == "" and spine_lines("none.") == "" and spine_lines("Unknown") == ""
+
+
+def test_spine_copy_sends_the_strip_both_ways_up(monkeypatch):
+    import httpx
+    import numpy as np
+
+    from claimagent.pipeline import vlm
+
+    sent = {}
+
+    class R:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"message": {"content": "A TALE OF\nTWO CITIES"}}
+
+    def post(url, timeout, json):
+        sent.update(json)
+        return R()
+
+    monkeypatch.setattr(httpx, "post", post)
+    assert vlm.copy_spine_text(np.zeros((40, 300, 3), np.uint8), timeout=5) == "A TALE OF | TWO CITIES"
+    assert sent["options"]["temperature"] == 0 and "Do not guess" in sent["messages"][0]["content"]

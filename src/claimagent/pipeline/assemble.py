@@ -213,7 +213,12 @@ def price_and_assemble(
                 review.append(
                     ReviewEntry(
                         ref_id=bid,
-                        reason=f'low-confidence title match ({conf:.2f}); check "{book.title}" against frame',
+                        reason=f'low-confidence title match ({conf:.2f}); check "{book.title}" against frame'
+                        + (
+                            "; spine text read by the vision model"
+                            if r.get("evidence", {}).get("spine_text_from")
+                            else ""
+                        ),
                     )
                 )
             check = r.get("check") or {}

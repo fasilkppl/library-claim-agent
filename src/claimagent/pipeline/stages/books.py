@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 import cv2
+import httpx
 import numpy as np
 
 from claimagent.capture.store import FrameMeta, SweepStore
@@ -217,6 +218,11 @@ def _not_books(reg: Registrar, det: dict[int, dict[str, Any]]) -> dict[int, str]
 
 
 CLOSE_READS_PER_SPINE = 3
+# A spine the OCR read nothing on in this many frames is a real spine whose print it cannot see (gold on dark
+# cloth): the local vision model copies its text from its two closest views (about 6 s each).
+VISION_READ_MIN_FRAMES = 3
+VISION_READS_PER_SPINE = 2
+VISION_READ_BUDGET_S = 30.0
 
 
 def _close_readings(
@@ -235,6 +241,45 @@ def _close_readings(
         img = cv2.imread(str(store.frame_path(metas[o.seq])))
         if img is not None and sp["length"] >= CROP_MIN_LENGTH_PX:
             out.append(read_spine_crop(img, sp, reader))
+    return out
+
+
+def _spine_strip(img: np.ndarray, corners: Any) -> np.ndarray:
+    """The spine alone, straightened to a horizontal strip."""
+    pts = np.array(corners, np.float32)
+    d01, d12 = np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[1] - pts[2])
+    if d01 < d12:
+        pts = np.roll(pts, -1, axis=0)
+    length, width = int(max(d01, d12)), max(16, int(min(d01, d12)))
+    dst = np.array([[0, 0], [length - 1, 0], [length - 1, width - 1], [0, width - 1]], np.float32)
+    strip: np.ndarray = cv2.warpPerspective(img, cv2.getPerspectiveTransform(pts, dst), (length, width))
+    return strip
+
+
+def _vision_readings(
+    store: SweepStore, t: Track, det: dict[int, dict[str, Any]], metas: dict[int, FrameMeta], deadline: float
+) -> list[str]:
+    """The vision model's copies of a spine's text on its closest whole views (empty when it read nothing)."""
+    from claimagent.pipeline.vlm import copy_spine_text
+
+    def rank(o: Any) -> float:
+        sp = det[o.seq]["spines"][o.index]
+        return float(sp["length"]) * (0.3 if sp["touches_edge"] else 1.0)
+
+    out = []
+    for o in sorted(t.observations, key=rank, reverse=True)[:VISION_READS_PER_SPINE]:
+        left = deadline - time.monotonic()
+        img = cv2.imread(str(store.frame_path(metas[o.seq]))) if o.seq in metas else None
+        if left < 3 or img is None:
+            break
+        try:
+            text = copy_spine_text(_spine_strip(img, det[o.seq]["spines"][o.index]["corners"]), timeout=left)
+        except (httpx.HTTPError, OSError, ValueError, cv2.error):
+            log.warning("vision read failed for track %s", t.id, exc_info=True)
+            break
+        log.info("vision read track %s frame %s: %r", t.id, o.seq, text)
+        if text:
+            out.append(text)
     return out
 
 
@@ -274,6 +319,7 @@ def read_tracks(
 
     rejected = _not_books(reg, det)
     books = []
+    vision_deadline = time.monotonic() + VISION_READ_BUDGET_S
     for t in reg.tracks:
         if t.id in excluded or t.id in rejected:
             continue
@@ -302,6 +348,13 @@ def read_tracks(
             obs_lines += close
             widths += [statistics.median(widths)] * len(close)
         best_text = consensus_text(obs_lines, widths)
+        text_source = "ocr"
+        if reader is not None and not _readable(best_text) and len(t.observations) >= VISION_READ_MIN_FRAMES:
+            copied = [c for c in _vision_readings(store, t, det, metas, vision_deadline) if _readable(c)]
+            if copied:
+                best_text = max(copied, key=lambda c: len(re.sub(r"[^A-Za-zÀ-ÿ]", "", c)))
+                readings.update({c: max(readings.get(c, 0.0), 1.0) for c in copied})
+                text_source = "vision-model"
 
         def obs_rank(o: Any) -> float:
             sp = det[o.seq]["spines"][o.index]
@@ -326,6 +379,7 @@ def read_tracks(
                 "frame_seq": rep.seq,
                 "bbox": det[rep.seq]["spines"][rep.index]["bbox"],
                 "spine_text": best_text,
+                "text_source": text_source,
                 # clearest single-frame readings first
                 "text_variants": sorted(readings, key=lambda x: -readings[x])[:5],
                 "text_score": round(best_score, 1),
@@ -417,6 +471,10 @@ def resolve_books(
             if r is None or conf > r.confidence:
                 r = replace(rv, confidence=conf, status="identified" if conf >= s.id_review else "unidentified")
                 from_single = v
+        vision = b.get("text_source") == "vision-model"
+        if vision and r is not None and not from_single and r.confidence > cap:
+            # Text copied by the vision model is one frame's reading: never confident, always reviewed.
+            r = replace(r, confidence=cap)
         entry: dict[str, Any] = {"track": b["track"], "readable": r is not None}
         if r is not None:
             entry.update(
@@ -441,6 +499,8 @@ def resolve_books(
             entry["evidence"] = dict(r.evidence)
             if from_single:
                 entry["evidence"]["matched_on_single_frame_reading"] = from_single
+            if vision:
+                entry["evidence"]["spine_text_from"] = "local vision model (the OCR read no text on this spine)"
         out.append(entry)
     data = {"books": out, "queries": len(results)}
     store.write_stage("resolve", data)

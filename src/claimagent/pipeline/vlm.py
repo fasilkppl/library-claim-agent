@@ -111,6 +111,50 @@ def _ask(crops: list[np.ndarray], timeout: float) -> list[str]:
     return answers
 
 
+SPINE_PROMPT = (
+    "This photo shows one book spine twice: as photographed, and upside down. Copy the words printed on it "
+    "exactly as printed, one line per line of print. Do not guess or complete a title from memory. If no words "
+    "are legible, reply NONE."
+)
+
+
+def spine_lines(answer: str) -> str:
+    """The model's copy of a spine as one reading ("A TALE OF | TWO CITIES"); "" when it read nothing."""
+    lines = []
+    for ln in answer.splitlines():
+        ln = re.sub(r"[*`\"“”]", "", ln).strip(" -:|.")
+        if not re.search(r"[^\W\d_]{2,}", ln) or re.match(UNSURE, ln.lower()):
+            continue
+        lines.append(ln)
+    return " | ".join(dict.fromkeys(lines))
+
+
+def copy_spine_text(strip: np.ndarray, timeout: float) -> str:
+    """Words the vision model reads on one straightened spine, for spines the OCR read nothing on (gold print
+    on dark cloth, say). The text then goes through the same catalogue matching as an OCR reading."""
+    s = get_settings()
+    gap = np.full((20, strip.shape[1], 3), 255, np.uint8)
+    ok, buf = cv2.imencode(
+        ".jpg", np.vstack([strip, gap, cv2.rotate(strip, cv2.ROTATE_180)]), [cv2.IMWRITE_JPEG_QUALITY, 92]
+    )
+    if not ok:
+        return ""
+    r = httpx.post(
+        f"{s.ollama_url}/api/chat",
+        timeout=timeout,
+        json={
+            "model": s.llm_model,
+            "stream": False,
+            "think": False,
+            "keep_alive": "60m",
+            "options": {"temperature": 0, "num_predict": 60},
+            "messages": [{"role": "user", "content": SPINE_PROMPT, "images": [base64.b64encode(buf).decode()]}],
+        },
+    )
+    r.raise_for_status()
+    return spine_lines(str(r.json().get("message", {}).get("content", "")))
+
+
 def _contents(text: str) -> tuple[str, str, bool] | None:
     """The contents word the text spells, with a space or a letter off allowed ("door mat"); None otherwise."""
     if FIXTURE_RE.fullmatch(text):
