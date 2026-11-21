@@ -13,6 +13,7 @@ import logging
 import re
 import statistics
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from rapidfuzz import fuzz
@@ -27,7 +28,7 @@ from claimagent.pipeline.price.sources import (
     SerpApiShopping,
     SerperShopping,
 )
-from claimagent.pipeline.resolve import content_tokens
+from claimagent.pipeline.resolve import content_tokens, english_words
 
 log = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ NOISE = (
     "signiert",
     "first edition",
     "1st edition",
+    "abridged",
     "antiquarian",
     "rare book",
     "unauthorized",
@@ -128,10 +130,20 @@ ESTABLISHED_SELLERS = (
 )
 
 
+# Budget marketplaces run under an established name: not a bookseller's own listing.
+NOT_ESTABLISHED = ("shopsy",)
+
+
+def is_established(seller: str) -> bool:
+    s = seller.lower()
+    return any(x in s for x in ESTABLISHED_SELLERS) and not any(x in s for x in NOT_ESTABLISHED)
+
+
 def established(offers: list[Offer]) -> tuple[list[Offer], bool]:
-    """Offers from established booksellers when at least two exist, else all (flag False)."""
-    est = [o for o in offers if any(s in o.seller.lower() for s in ESTABLISHED_SELLERS)]
-    return (est, True) if len(est) >= 2 else (offers, False)
+    """Offers from established booksellers when any exists, else all (flag False). One established listing
+    beats a median of marketplace offers (seen: one Amazon listing at Rs 851 outvoted by import offers)."""
+    est = [o for o in offers if is_established(o.seller)]
+    return (est, True) if est else (offers, False)
 
 
 # Translations sold under the original title name their language in the listing.
@@ -190,6 +202,13 @@ def main_title(title: str, author: str = "") -> str:
             else head
         )
     return t.strip()
+
+
+def query_author(author: str) -> str:
+    """The author as shops list the name: the first author, and of a long full name only its last two words
+    ("Avul Pakir Jainulabdeen Abdul Kalam" -> "Abdul Kalam"; listings read "A.P.J. Abdul Kalam")."""
+    words = author.split(",")[0].split()
+    return " ".join(words[-2:] if len(words) > 3 else words)
 
 
 def _listing_parts(listing: str) -> list[str]:
@@ -264,7 +283,31 @@ DESCRIPTOR_WORDS = {
     "original",
     "book",
     "story",
+    "expanded",
 }
+
+
+@lru_cache(maxsize=1)
+def _english() -> frozenset[str]:
+    return english_words()
+
+
+def _another_language(listing: str, title: str, author: str, parts: list[str], match: int) -> bool:
+    """A translation sold under the original title: a word with accents the book's title does not have
+    ("Rework : réussir autrement"), or a subtitle mostly in words that are not English ("Rework : Apni
+    Karyashaili Ko Hamesha Ke Liye Badal Dein", the Hindi edition)."""
+    accented = set(re.findall(r"[a-zß-ÿ]*[à-öø-ÿ][a-zà-ÿ]*", listing.lower()))
+    if accented - set(re.findall(r"[a-zß-ÿ]+", title.lower())):
+        return True
+    words = _english()
+    if not words:
+        return False
+    names = set(re.findall(r"[a-z]+", f"{title} {author}".lower()))  # names are not English words
+    for j, part in enumerate(parts):
+        toks = [w for w in re.findall(r"[a-z]{3,}", part.lower()) if w not in names]
+        if j != match and len(toks) >= 3 and sum(w in words for w in toks) * 2 < len(toks):
+            return True
+    return False
 
 
 def book_offer_matches(offer: Offer, title: str, author: str, isbn_query: bool = False) -> bool:
@@ -283,11 +326,28 @@ def book_offer_matches(offer: Offer, title: str, author: str, isbn_query: bool =
         return False  # a listing title in another script (Bengali, Persian...) is another language edition
     if len(re.findall(r"\bby\b", t)) >= 2:
         return False  # "A by X and B by Y": two books sold together
+    if re.search(r"\(\d{4}-\d{2}-\d{2}\)", offer.title):
+        return False  # "Title by Author(2003-05-27)": a reseller listing that names no edition (old or imported stock)
     author_toks = {w for a in author.split(",") for w in content_tokens(a)}
+    # Initials as shops print them glued: "A.P.J. Abdul Kalam" -> "apj"
+    author_toks |= {
+        "".join(ini)
+        for a in author.split(",")
+        if len(ini := re.findall(r"\b([a-z])\b", a.lower().replace(".", " "))) >= 2
+    }
     want = [w for w in content_tokens(main_title(title, author)) if w not in author_toks]
     if not want:
         return False
-    for part in _listing_parts(offer.title):
+    parts = _listing_parts(offer.title)
+    in_brackets = {p.strip().lower() for p in re.findall(r"[(\[]([^)\]]*)", offer.title)}
+    outside = [w for p in parts if p.strip().lower() not in in_brackets for w in content_tokens(p)]
+    for i, part in enumerate(parts):
+        # A match only inside brackets, after another title, is a series name: "The Dragonet Prophecy (Wings
+        # Of Fire #1)" is not Wings of Fire.
+        if part.strip().lower() in in_brackets:
+            others = [w for w in outside if w not in DESCRIPTOR_WORDS | FORMAT_WORDS | author_toks | set(want)]
+            if len(others) >= 2:
+                continue
         skip = (FORMAT_WORDS | CONDITION_WORDS | author_toks) - set(want)  # "Brave New World" keeps "new"
         toks = [w for w in content_tokens(part) if w not in skip]
         if not toks:
@@ -297,6 +357,21 @@ def book_offer_matches(offer: Offer, title: str, author: str, isbn_query: bool =
         if hits < len(want):
             continue
         if isbn_query or (len(extra) <= MAX_EXTRA_WORDS and all(x in DESCRIPTOR_WORDS for x in extra)):
+            if _another_language(offer.title, title, author, parts, i):
+                return False
+            # "Title: Subtitle & Another Title" or "Title: Subtitle and Another Title": two books sold together (an
+            # "&" in the book's own title is fine).
+            subtitle = title_l.partition(":")[2].strip()
+            for j, q in enumerate(parts):
+                rest = q.lower().strip()
+                if j == i:
+                    continue
+                if subtitle and rest.startswith(subtitle):
+                    rest = rest[len(subtitle) :].strip()
+                    if re.match(r"(&|and\b|\+)\s*\w", rest):
+                        return False
+                if "&" in rest and "&" not in title_l:
+                    return False
             return True
     return False
 
@@ -317,6 +392,23 @@ def main_cluster(values: list[float]) -> list[float]:
         if j - i + 1 > len(best):
             best = vs[i : j + 1]
     return best
+
+
+def local_band(values: list[float]) -> list[float]:
+    """The prices of the edition sold in this market. A jump of more than CLUSTER_SPAN between neighbouring
+    prices separates editions for different markets: imported copies cost several times the local edition (seen:
+    Rs 851 here, Rs 3,089-3,489 imported) and collector copies more. Within a continuous price range every
+    listing counts (its median is the figure). The cheapest range holding at least a third of the listings is the
+    local edition; when none does, all listings. Chosen over the densest-band rule on five listing snapshots
+    taken over six hours (31 of 48 book prices within 25% of the reference sheet, against 26)."""
+    vs = sorted(values)
+    ranges: list[list[float]] = [[vs[0]]] if vs else []
+    for v in vs[1:]:
+        if v > ranges[-1][-1] * CLUSTER_SPAN:
+            ranges.append([v])
+        else:
+            ranges[-1].append(v)
+    return next((r for r in ranges if len(r) * 3 >= len(vs)), vs)
 
 
 def robust_median(values: list[float]) -> tuple[float, list[float]]:
@@ -362,9 +454,13 @@ class PriceEngine:
         return fig
 
     @staticmethod
-    def _figure(offers: list[Offer], condition: str, query: str) -> PriceFigure:
+    def _figure(offers: list[Offer], condition: str, query: str, local: bool = False) -> PriceFigure:
         amounts = [o.amount for o in offers]
-        med, kept = robust_median(amounts)
+        if local and len(amounts) > 2:
+            kept = local_band(amounts)
+            med = statistics.median(kept)
+        else:
+            med, kept = robust_median(amounts)
         rep = min(offers, key=lambda o: abs(o.amount - med))  # the cited offer is the one closest to the median
         lo, hi = quantiles(kept)
         return PriceFigure(
@@ -414,43 +510,52 @@ class PriceEngine:
 
     # ---------------------------------------------------------------- books
     def book(self, title: str, author: str, isbn: str, volume_id: str, country: str) -> tuple[PriceFigure, PriceFigure]:
-        new_fig, shop = self._book_new(title, author, isbn, volume_id, country)
-        used_fig = self._book_used(title, author, isbn, country, shop, new_fig)
+        # The catalogue match names the work, not the copy on the shelf: its ISBN is one edition among many (seen:
+        # the US hardcover of Go Set a Watchman at Rs 1,818; the paperback sells for about Rs 600). Prices are
+        # searched by title and author; the ISBN is not used.
+        new_fig, shop = self._book_new(title, author, "", volume_id, country)
+        used_fig = self._book_used(title, author, "", country, shop, new_fig)
         return new_fig, used_fig
 
     def _book_new(
         self, title: str, author: str, isbn: str, volume_id: str, country: str
     ) -> tuple[PriceFigure, list[Offer]]:
         currency = COUNTRY_CURRENCY.get(country.upper(), "")
-        title_query = f"{main_title(title, author)} {author.split(',')[0]} book".strip()
-        # The ISBN finds the exact edition where shops index it; Google Shopping outside the US often ignores
-        # an ISBN and returns unrelated books, so the title search follows when the ISBN finds no copy.
-        queries = [isbn, title_query] if isbn else [title_query]
+        title_query = f"{main_title(title, author)} {query_author(author)} book".strip()
+        # When no established bookseller shows up, one more search as a paperback: Google Shopping then lists
+        # booksellers' print copies (seen: Rework, whose first search held only translations and study notes).
+        queries = [title_query, f"{main_title(title, author)} {query_author(author)} paperback".strip()]
         new_fig = PriceFigure(currency=currency, query=queries[0])
         shop: list[Offer] = []
+        fallback: PriceFigure | None = None
         for query in queries:
-            found = [o for o in self.serp.search(query, country) if book_offer_matches(o, title, author, query == isbn)]
+            found = [o for o in self.serp.search(query, country) if book_offer_matches(o, title, author)]
             found = [o for o in found if o.currency == currency or not o.currency]
             shop += found
             # Rare-book marketplaces (Biblio, AbeBooks...) list collector and second-hand copies: not a new copy.
             new_offers, from_established = established(
                 [o for o in found if o.condition == "new" and not USED_BOOK_SELLERS.search(o.seller)]
             )
-            if new_offers:
-                new_fig = self._figure(new_offers, "new", query)
-                new_fig.currency = currency
-                if not from_established:
-                    new_fig.note = "no established bookseller lists it; median of all new offers"
+            if not new_offers:
+                continue
+            fig = self._figure(new_offers, "new", query, local=True)
+            fig.currency = currency
+            if from_established:
+                new_fig = fig
                 break
+            if fallback is None:
+                fig.note = "no established bookseller lists it; median of all new offers"
+                fallback = fig
+        else:
+            if fallback is not None:
+                new_fig = fallback
         # Other market: US Google Shopping, converted.
         if new_fig.amount is None and country.upper() != "US" and self.serp.enabled:
-            for query in queries:
+            for query in queries[:1]:
                 us = [
                     o
                     for o in self.serp.search(query, "US")
-                    if book_offer_matches(o, title, author, query == isbn)
-                    and o.condition == "new"
-                    and o.currency in ("USD", "")
+                    if book_offer_matches(o, title, author) and o.condition == "new" and o.currency in ("USD", "")
                 ]
                 if us:
                     fig = self._figure(us, "new", query)

@@ -218,3 +218,85 @@ def test_printed_text_is_a_brand_only_when_it_reads_as_words():
     assert _reads_as_words("CRACKER SHAPE CHOCO BITES")
     assert not _reads_as_words("12 8bun ong")
     assert not _reads_as_words("C perch serch youeг")
+
+
+def test_the_catalogue_isbn_is_not_searched():
+    class Recorder(FakeSerp):
+        def __init__(self, by_country):
+            super().__init__(by_country)
+            self.queries = []
+
+        def search(self, q, country, used=False):
+            self.queries.append(q)
+            return super().search(q, country, used)
+
+    serp = Recorder({"IN": [offer("Go Set a Watchman", 596, src="Google Shopping")]})
+    PriceEngine(serp, FakeEbay(), FakeFx(), FakeGBooks()).book(
+        "Go Set a Watchman", "Harper Lee", "9780062409850", "", "IN"
+    )
+    assert "9780062409850" not in serp.queries and serp.queries[0] == "Go Set a Watchman Harper Lee book"
+
+
+def test_one_established_bookseller_beats_marketplace_offers_but_a_budget_marketplace_is_not_one():
+    from claimagent.pipeline.price.engine import established, is_established
+
+    amazon = Offer("Wings of Fire", 379, "INR", "u", "amazon.in", "new", "s", "t", "q")
+    market = Offer("Wings of Fire", 99, "INR", "u", "Meesho", "new", "s", "t", "q")
+    assert established([amazon, market]) == ([amazon], True)
+    assert not is_established("Shopsy By Flipkart") and is_established("Flipkart")
+
+
+def test_the_local_edition_range_not_the_imported_copies():
+    from claimagent.pipeline.price.engine import local_band
+
+    assert local_band([851, 3089, 3489]) == [851]  # imported copies cost 3.6 times the local print
+    assert local_band([149, 167.19, 379, 398, 499]) == [149, 167.19, 379, 398, 499]  # one continuous range
+    assert local_band([497, 504, 547, 599, 640, 3498, 15335.58]) == [497, 504, 547, 599, 640]
+
+
+def test_translations_series_names_dated_resellers_and_pairs_are_not_the_book():
+    ok = lambda t, title, author="": book_offer_matches(offer(t, 300), title, author)  # noqa: E731
+    assert not ok("Rework : réussir autrement - Nouvelle édition: Entrepreneurs", "Rework", "Jason Fried")
+    assert not ok("Rework : Apni Karyashaili Ko Hamesha Ke Liye Badal Dein", "Rework", "Jason Fried")
+    assert ok("Wings of Fire: An Autobiography of Abdul Kalam", "Wings of Fire", "A.P.J. Abdul Kalam")
+    assert ok(
+        "Wings of Fire APJ Abdul Kalam - An Autobiography - [NEW EXPANDED EDITION",
+        "Wings of Fire",
+        "A.P.J. Abdul Kalam",
+    )
+    assert not ok("The Dragonet Prophecy (Wings Of Fire #1)", "Wings of Fire", "A.P.J. Abdul Kalam")
+    assert ok("The Lost Symbol: (Robert Langdon Book 3)", "The Lost Symbol", "Dan Brown")
+    assert not ok("The Lost Symbol by Dan Brown(1905-07-02)", "The Lost Symbol", "Dan Brown")
+    almanack = "The Almanack of Naval Ravikant: A Guide to Wealth and Happiness"
+    assert not ok(f"{almanack} & How to Talk to Anyone", almanack, "Eric Jorgenson")
+    assert ok("Pride & Prejudice (Penguin Classics)", "Pride & Prejudice", "Jane Austen")
+    assert not ok(f"{almanack} and The Book of Elon", almanack, "Eric Jorgenson")
+    assert not ok("A Tale Of Two Cities Abridged Version", "A Tale of Two Cities", "Charles Dickens")
+
+
+def test_a_long_full_name_is_searched_as_shops_print_it():
+    from claimagent.pipeline.price.engine import query_author
+
+    assert query_author("Avul Pakir Jainulabdeen Abdul Kalam") == "Abdul Kalam"
+    assert (
+        query_author("M. K. Gandhi") == "M. K. Gandhi" and query_author("Sam Bhagwat, Michelle Gienow") == "Sam Bhagwat"
+    )
+
+
+def test_a_paperback_search_when_no_established_bookseller_lists_the_book():
+    class ByQuery:
+        enabled = True
+
+        def search(self, q, country, used=False):
+            if used or country != "IN":
+                return []
+            if q.endswith("paperback"):
+                return [
+                    Offer(
+                        "ReWork: Change the Way You Work Forever", 326.27, "INR", "u", "amazon.in", "new", "s", "t", "q"
+                    )
+                ]
+            return [Offer("Rework by Jason Fried", 165, "INR", "u", "Indianbookstore.co.in", "new", "s", "t", "q")]
+
+    new, _ = PriceEngine(ByQuery(), FakeEbay(), FakeFx(), FakeGBooks()).book("Rework", "Jason Fried", "", "", "IN")
+    assert new.amount == 326.27 and new.query == "Rework Jason Fried paperback" and not new.note
