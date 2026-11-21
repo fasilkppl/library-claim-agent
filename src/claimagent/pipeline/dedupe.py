@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from typing import Any
 
 import cv2
@@ -26,7 +27,7 @@ import numpy as np
 from rapidfuzz import fuzz
 from rapidfuzz.distance import Levenshtein
 
-from claimagent.pipeline.resolve import same_work, volume_numbers
+from claimagent.pipeline.resolve import content_tokens, same_work, volume_numbers
 
 log = logging.getLogger(__name__)
 
@@ -177,11 +178,31 @@ def on_top(a: _Book, b: _Book) -> bool:
     return hits >= min(2, len(shared))
 
 
+GLIMPSE_LETTERS = 70  # letter match (spaces ignored) of a glimpse's reading to an identified title and author
+
+
+def _letters(text: str) -> str:
+    """Letters only, accents dropped: "WATCHMÄNT | HARPERLEE" -> "watchmantharperlee"."""
+    return re.sub(r"[^a-z]", "", unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode().lower())
+
+
+def _title_inside(a: _Book, b: _Book) -> bool:
+    """One catalogue title holds all the words (two or more) of the other, by the same author: "My Experiments
+    with Truth" and "Mahatma Gandhi: The Story of My Experiments with Truth" are one book. One word is not
+    enough ("Dune" in "Dune Messiah")."""
+    ta, tb = (set(content_tokens(re.sub(r"\s+by\s+.*$", "", x.title, flags=re.I))) for x in (a, b))
+    short, long_ = sorted((ta, tb), key=len)
+    if len(short) < 2 or not short <= long_:
+        return False
+    aa, ab = (set(content_tokens(str(x.res.get("author", "")))) for x in (a, b))
+    return not (aa and ab) or bool(aa & ab)
+
+
 def similarity(a: _Book, b: _Book) -> float:
     if distinct(a, b):
         return 0.0
     if a.identified and b.identified:
-        return 1.0 if same_work(a.title, b.title) else 0.0
+        return 1.0 if same_work(a.title, b.title) or _title_inside(a, b) else 0.0
     if a.identified != b.identified:
         known, other = (a, b) if a.identified else (b, a)
         if not other.readings:
@@ -192,6 +213,14 @@ def similarity(a: _Book, b: _Book) -> float:
             cov = len(_matched(r, known.work_tokens)) / len(r)
             if cov >= SAME_READING and any(len(w) >= 5 for w in _matched(r, known.work_tokens)):
                 best = max(best, round(cov, 3))
+        # A brief glimpse (a quick look at the shelf before the slow pass) is often read with words glued or split
+        # ("ND HARPERLEE", "GO SETA") and short title words drop out of the word match; its letters still spell
+        # the book. Glimpses only: a well-seen spine's reading can carry a neighbour's leaked lines.
+        if int(other.read.get("observations", 0)) <= GLIMPSE_FRAMES:
+            spelled = _letters(str(other.read.get("spine_text", "")))
+            name = _letters(f"{known.title} {known.res.get('author', '')}")
+            if len(spelled) >= 8 and fuzz.partial_ratio(spelled, name) >= GLIMPSE_LETTERS:
+                best = max(best, SAME_ANYWHERE)
         # Reading against reading only when nearly identical: spine readings can carry a neighbour's leaked
         # lines ("WATCHMAN HARPER LEE" read onto two spines), and a partial overlap of leaks is not the same book.
         own = _best_reading(known, other)

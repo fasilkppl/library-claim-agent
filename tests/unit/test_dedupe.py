@@ -206,3 +206,42 @@ def test_volumes_of_a_set_side_by_side_keep_their_titles():
     _read, out, report = dedupe_books({"books": shelf}, {"books": resolved}, boxes)
     assert [r.get("title") for r in out["books"]].count("Griechisches Rechtsdenken") == 2
     assert not report["titles_removed"]
+
+
+def test_one_book_under_two_catalogue_titles_is_counted_once():
+    # Sweep 20261121-185148: My Experiments came back as three catalogue records and was counted three times.
+    shelf = [
+        book(1, "A", 1, "MY EXPERIMEIITS | M.K.GANDHI | WITH TRUTH"),
+        book(2, "B", 4, "WITH TRUTH | MY EXPERIMENTS"),
+    ]
+    resolved = [
+        res(1, "Mahatma Gandhi: The Story of My Experiments with Truth", "Mahatma Gandhi"),
+        res(2, "My Experiments with Truth", "M.K. Gandhi"),
+    ]
+    books, _, _ = run(shelf, resolved)
+    assert len(books) == 1
+    # Shared words are not enough between two different works.
+    shelf = [book(3, "A", 1, "PRINCIPLES OF BUILDING AI AGENTS"), book(4, "A", 2, "PATTERNS FOR BUILDING AI AGENTS")]
+    resolved = [
+        res(3, "Principles of Building AI Agents", "Sam Bhagwat"),
+        res(4, "Patterns for Building AI Agents", "Sam Bhagwat"),
+    ]
+    books, _, _ = run(shelf, resolved)
+    assert len(books) == 2
+
+
+def test_a_quick_glimpse_read_with_glued_words_joins_its_book():
+    # Same sweep: a first look at the shelf read "WATCHMAN | GO SETA | ND HARPERLEE O" (2 frames).
+    shelf = [
+        book(5, "A", 3, "WATCHMAN | GO SETA | ND HARPERLEE O", obs=2),
+        book(6, "B", 3, "WATCHMÄNT HARPER LEE | GO SET A", obs=16),
+    ]
+    books, _, _ = run(shelf, [res(6, "Go Set a Watchman", "Harper Lee")])
+    assert len(books) == 1
+    # A glimpse that spells another book's title is kept apart.
+    shelf = [
+        book(7, "A", 1, "IWO CTMPS | A TADEON | A TAIL OR", obs=2),
+        book(8, "B", 2, "THE ALMANACK OF NAVAL RAVIKANT", obs=12),
+    ]
+    books, _, _ = run(shelf, [res(8, "The Almanack of Naval Ravikant", "Eric Jorgenson")])
+    assert len(books) == 2

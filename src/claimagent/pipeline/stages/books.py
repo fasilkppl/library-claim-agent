@@ -442,6 +442,9 @@ RESOLVE_BUDGET_S = 100.0  # the packet is due within 5 minutes of the sweep
 HARD_STOP_GRACE_S = 10.0
 RULER_BUDGET_S = 30.0
 RULER_WORKERS = 6
+# An identified book's photo thickness further than this from its catalogue thickness gives way to the catalogue:
+# thin spines are a few pixels wide and their outlines spill onto neighbours (Patterns, 0.6 cm, measured 3.0).
+THICK_DISAGREE = 0.25
 
 
 def _norm_title(title: str) -> str:
@@ -562,6 +565,14 @@ def measure_books(
                 candidates,
             )
         )
+        # The same catalogue records (already fetched for the heights) give each identified book's thickness.
+        thick_cat = dict(
+            zip(
+                [b["track"] for b, _ in candidates],
+                pool.map(lambda br: resolver.catalogue_thickness_cm(br[1].get("volume_id", "")), candidates),
+                strict=True,
+            )
+        )
     for (b, r), h_cm in zip(candidates, heights, strict=True):
         t = tracks[b["track"]]
         log.info("ruler candidate %s %r: catalogue height %s cm (%s)", t.id, r.get("title"), h_cm, t.orientation)
@@ -630,6 +641,11 @@ def measure_books(
                     diff = abs(alt - height) / height
                     if diff > s.scale_disagreement:
                         checks.append(f"{name} scale disagrees by {diff:.0%}")
+        cat = thick_cat.get(t.id)
+        if cat is not None and (thick is None or abs(thick - cat[0]) / cat[0] > THICK_DISAGREE):
+            measured = "none" if thick is None else f"{thick:.1f} cm"
+            checks.append(f"thickness from the catalogue ({cat[1]}); the photo gave {measured}")
+            thick = cat[0]
         if b["only_partial"]:
             checks.append("spine only seen cut off at the frame edge; size is a lower bound")
         out.append(

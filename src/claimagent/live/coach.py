@@ -38,6 +38,7 @@ class _State:
     blurry_run: int = 0
     glare_run: int = 0
     asked_art: set[int] = field(default_factory=set)
+    art_seen: set[int] = field(default_factory=set)
     last_progress: float = 0.0
     unreadable_run: int = 0
     top_cut: int = 0
@@ -161,7 +162,11 @@ class Coach:
         for it in d.get("items", []):
             if CATEGORY.get(it["label"]) == "art" and it["conf"] > 0.3:
                 key = d["seq"]
-                if not any(abs(key - k) < 8 for k in st.asked_art):
+                # A real picture stays in view for several frames; the detector's one-frame "framed picture" (a book
+                # cover, a printed box, a mat) is noise, so the question waits for a second sighting nearby.
+                seen_before = any(0 < key - k < 8 for k in st.art_seen)
+                st.art_seen.add(key)
+                if seen_before and not any(abs(key - k) < 8 for k in st.asked_art):
                     st.asked_art.add(key)
                     self.hint("art", "I can see a framed picture. Is it an original or a print?", gap=4, per_kind=15)
         # No spoken running counts: live counts still include spines seen twice, so they would mislead.

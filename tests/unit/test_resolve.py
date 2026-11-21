@@ -138,3 +138,28 @@ def test_a_full_name_possessive_by_another_author_is_a_book_about_the_book() -> 
     assert not derivative(Candidate(title="Ender's Game", authors=["Orson Scott Card"]))
     assert not derivative(Candidate(title="Charlotte's Web", authors=["E. B. White"]))
     assert not derivative(Candidate(title="The Handmaid's Tale", authors=["Margaret Atwood"]))
+
+
+def test_catalogue_thickness_from_listed_size_or_page_count():
+    from claimagent.pipeline.resolve import Resolver
+
+    class _Resp:
+        def __init__(self, data):
+            self.data, self.status = data, 200
+
+    class _Http:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, url, params, source=""):
+            return _Resp(self.data)
+
+    listed = Resolver(_Http({"volumeInfo": {"dimensions": {"thickness": "2.40 cm"}}}))
+    assert listed.catalogue_thickness_cm("v1") == (2.4, "catalogue thickness")
+    pages = Resolver(_Http({"volumeInfo": {"pageCount": 244}}))  # The Almanack: 1.5 cm on the hand-measured shelf
+    assert pages.catalogue_thickness_cm("v2") == (1.6, "244 pages in the catalogue")
+    assert Resolver(_Http({"volumeInfo": {}})).catalogue_thickness_cm("v3") is None
+    assert pages.catalogue_thickness_cm("") is None
+    # The page count wins over a listed thickness (often another edition's).
+    both = Resolver(_Http({"volumeInfo": {"dimensions": {"thickness": "3.00 cm"}, "pageCount": 180}}))
+    assert both.catalogue_thickness_cm("v4") == (1.2, "180 pages in the catalogue")

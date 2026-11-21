@@ -124,6 +124,8 @@ def english_words() -> frozenset[str]:
 
 
 GOOGLE_QUERIES_PER_TEXT = 6
+PAGE_CM = 0.0055  # printed thickness per page (about 0.11 mm a sheet), for a spine estimated from its page count
+COVER_CM = 0.25  # both covers together
 LIVE_QUERIES = 2  # during the walk: the two broadest queries only, so a title is said within seconds
 
 GLUE_WORDS = {"of", "the", "and", "to", "in", "on", "for", "with", "a", "an", "der", "die", "das", "und"}
@@ -615,6 +617,28 @@ class Resolver:
             h = self._height(f"https://www.googleapis.com/books/v1/volumes/{vid}", params)
             if h:
                 return h
+        return None
+
+    def catalogue_thickness_cm(self, volume_id: str) -> tuple[float, str] | None:
+        """(thickness, where it comes from) from the matched Google Books volume (the record the height comes from):
+        its listed thickness, else an estimate from its page count, as printers size a spine (PAGE_CM a page plus
+        COVER_CM of cover)."""
+        if not volume_id or (self.deadline is not None and time.monotonic() > self.deadline):
+            return None
+        params: dict[str, Any] = {"key": self.google_key} if self.google_key else {}
+        try:
+            r = self.http.get(f"https://www.googleapis.com/books/v1/volumes/{volume_id}", params, source="googlebooks")
+        except (RuntimeError, LookupError):
+            return None
+        vi = (r.data or {}).get("volumeInfo", {}) if r.status < 400 else {}
+        # The page count first: a listed thickness is often another edition's (Wings of Fire listed at 3.0 cm,
+        # 1.5 on the shelf); on five hand-measured books the page count was 18% off on average, the listing 43%.
+        pages = int(vi.get("pageCount") or 0)
+        if 40 <= pages <= 1500:
+            return round(pages * PAGE_CM + COVER_CM, 1), f"{pages} pages in the catalogue"
+        m = re.match(r"([\d.]+)\s*cm", str(vi.get("dimensions", {}).get("thickness", "")))
+        if m and 0.2 <= float(m.group(1)) <= 10:
+            return float(m.group(1)), "catalogue thickness"
         return None
 
     def _height(self, url: str, params: dict[str, Any]) -> float | None:
