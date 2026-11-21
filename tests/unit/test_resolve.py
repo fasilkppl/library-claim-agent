@@ -163,3 +163,29 @@ def test_catalogue_thickness_from_listed_size_or_page_count():
     # The page count wins over a listed thickness (often another edition's).
     both = Resolver(_Http({"volumeInfo": {"dimensions": {"thickness": "3.00 cm"}, "pageCount": 180}}))
     assert both.catalogue_thickness_cm("v4") == (1.2, "180 pages in the catalogue")
+
+
+def test_thickness_from_open_library_editions_when_there_is_no_google_volume():
+    from claimagent.pipeline.resolve import Resolver
+
+    class _Resp:
+        def __init__(self, data):
+            self.data, self.status = data, 200
+
+    class _Http:
+        def __init__(self, data):
+            self.data = data
+
+        def get(self, url, params, source=""):
+            return _Resp(self.data)
+
+    editions = {
+        "entries": [
+            {"number_of_pages": 640},
+            {"number_of_pages": 656, "physical_format": "Hardcover"},
+            {"number_of_pages": 672, "physical_format": "Hardcover"},
+            {"number_of_pages": None},
+        ]
+    }
+    got = Resolver(_Http(editions)).catalogue_thickness_cm("", "https://openlibrary.org/works/OL1W")
+    assert got == (4.1, "656 pages (median of 3 Open Library editions)")  # mostly hardcover: 656 x 0.0055 + 0.45

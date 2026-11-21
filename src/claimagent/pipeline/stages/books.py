@@ -556,23 +556,20 @@ def measure_books(
         if res_by_track.get(b["track"], {}).get("status") == "identified"
         and res_by_track[b["track"]].get("confidence", 0) >= s.id_review
     ]
+
+    def catalogue_size(br: tuple[dict[str, Any], dict[str, Any]]) -> tuple[float | None, tuple[float, str] | None]:
+        # The thickness comes from the records the height lookup has just read, so it is asked right after it
+        # (a later round hit the stage's deadline and was skipped).
+        r = br[1]
+        h = resolver.catalogue_height_cm(
+            r.get("volume_id", ""), r.get("title", ""), r.get("author", ""), r.get("url", "")
+        )
+        return h, resolver.catalogue_thickness_cm(r.get("volume_id", ""), r.get("url", ""), check_deadline=False)
+
     with ThreadPoolExecutor(max_workers=RULER_WORKERS) as pool:
-        heights = list(
-            pool.map(
-                lambda br: resolver.catalogue_height_cm(
-                    br[1].get("volume_id", ""), br[1].get("title", ""), br[1].get("author", ""), br[1].get("url", "")
-                ),
-                candidates,
-            )
-        )
-        # The same catalogue records (already fetched for the heights) give each identified book's thickness.
-        thick_cat = dict(
-            zip(
-                [b["track"] for b, _ in candidates],
-                pool.map(lambda br: resolver.catalogue_thickness_cm(br[1].get("volume_id", "")), candidates),
-                strict=True,
-            )
-        )
+        sizes = list(pool.map(catalogue_size, candidates))
+    heights = [h for h, _ in sizes]
+    thick_cat = {b["track"]: th for (b, _), (_, th) in zip(candidates, sizes, strict=True) if th is not None}
     for (b, r), h_cm in zip(candidates, heights, strict=True):
         t = tracks[b["track"]]
         log.info("ruler candidate %s %r: catalogue height %s cm (%s)", t.id, r.get("title"), h_cm, t.orientation)
@@ -642,10 +639,13 @@ def measure_books(
                     if diff > s.scale_disagreement:
                         checks.append(f"{name} scale disagrees by {diff:.0%}")
         cat = thick_cat.get(t.id)
-        if cat is not None and (thick is None or abs(thick - cat[0]) / cat[0] > THICK_DISAGREE):
-            measured = "none" if thick is None else f"{thick:.1f} cm"
-            checks.append(f"thickness from the catalogue ({cat[1]}); the photo gave {measured}")
-            thick = cat[0]
+        if cat is not None:
+            if thick is None or abs(thick - cat[0]) / cat[0] > THICK_DISAGREE:
+                measured = "none" if thick is None else f"{thick:.1f} cm"
+                checks.append(f"thickness from the catalogue ({cat[1]}); the photo gave {measured}")
+                thick = cat[0]
+            else:
+                thick = (thick + cat[0]) / 2  # two independent estimates that agree: their mean
         if b["only_partial"]:
             checks.append("spine only seen cut off at the frame edge; size is a lower bound")
         out.append(

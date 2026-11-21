@@ -125,7 +125,8 @@ def english_words() -> frozenset[str]:
 
 GOOGLE_QUERIES_PER_TEXT = 6
 PAGE_CM = 0.0055  # printed thickness per page (about 0.11 mm a sheet), for a spine estimated from its page count
-COVER_CM = 0.25  # both covers together
+COVER_CM = 0.25  # both covers of a paperback together
+HARDCOVER_CM = 0.45  # both boards of a hardcover
 LIVE_QUERIES = 2  # during the walk: the two broadest queries only, so a title is said within seconds
 
 GLUE_WORDS = {"of", "the", "and", "to", "in", "on", "for", "with", "a", "an", "der", "die", "das", "und"}
@@ -619,12 +620,42 @@ class Resolver:
                 return h
         return None
 
-    def catalogue_thickness_cm(self, volume_id: str) -> tuple[float, str] | None:
-        """(thickness, where it comes from) from the matched Google Books volume (the record the height comes from):
-        its listed thickness, else an estimate from its page count, as printers size a spine (PAGE_CM a page plus
-        COVER_CM of cover)."""
-        if not volume_id or (self.deadline is not None and time.monotonic() > self.deadline):
+    def catalogue_thickness_cm(
+        self, volume_id: str, work_url: str = "", check_deadline: bool = True
+    ) -> tuple[float, str] | None:
+        """(thickness, where it comes from), estimated from the page count as printers size a spine (PAGE_CM a page
+        plus the covers): the matched Google Books volume first, else the editions Open Library lists for the work.
+        Both are the records the height lookup has just read (`check_deadline=False` when called right after it)."""
+        if check_deadline and self.deadline is not None and time.monotonic() > self.deadline:
             return None
+        got = self._google_thickness(volume_id) if volume_id else None
+        if got is None and "openlibrary.org/works/" in work_url:
+            got = self._openlibrary_thickness(work_url)
+        return got
+
+    def _openlibrary_thickness(self, work_url: str) -> tuple[float, str] | None:
+        """Median page count over the work's editions; hardcover covers when most of those editions are hardcover."""
+        key = work_url.rstrip("/").split("/works/")[-1]
+        try:
+            r = self.http.get(
+                f"https://openlibrary.org/works/{key}/editions.json", {"limit": 100}, source="openlibrary"
+            )
+        except (RuntimeError, LookupError):
+            return None
+        pages: list[int] = []
+        hard = 0
+        for e in (r.data or {}).get("entries", []) if r.status < 400 else []:
+            n = e.get("number_of_pages")
+            if isinstance(n, int) and 40 <= n <= 1500:
+                pages.append(n)
+                hard += "hardcover" in str(e.get("physical_format", "")).lower()
+        if not pages:
+            return None
+        n = int(statistics.median(pages))
+        cover = HARDCOVER_CM if hard * 2 > len(pages) else COVER_CM
+        return round(n * PAGE_CM + cover, 1), f"{n} pages (median of {len(pages)} Open Library editions)"
+
+    def _google_thickness(self, volume_id: str) -> tuple[float, str] | None:
         params: dict[str, Any] = {"key": self.google_key} if self.google_key else {}
         try:
             r = self.http.get(f"https://www.googleapis.com/books/v1/volumes/{volume_id}", params, source="googlebooks")
