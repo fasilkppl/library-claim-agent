@@ -1,10 +1,11 @@
 """Post-sweep stages. Each is a function from earlier stage outputs to its own JSON in stages/.
 
-select -> tracking -> analyze -> register -> read -> resolve -> measure -> items -> room -> price -> assemble
+select -> tracking -> analyze -> register -> read -> resolve -> second_look -> measure -> items -> room
+-> price -> assemble
 """
 
 from claimagent.pipeline.household import CATEGORY
-from claimagent.pipeline.stages.books import consensus_text, measure_books, read_tracks, resolve_books
+from claimagent.pipeline.stages.books import consensus_text, measure_books, read_tracks, resolve_books, second_look
 from claimagent.pipeline.stages.frames import (
     analyze_frames,
     check_tracking,
@@ -27,5 +28,6 @@ __all__ = [
     "read_tracks",
     "register_tracks",
     "resolve_books",
+    "second_look",
     "select_frames",
 ]

@@ -223,6 +223,20 @@ CLOSE_READS_PER_SPINE = 3
 VISION_READ_MIN_FRAMES = 3
 VISION_READS_PER_SPINE = 2
 VISION_READ_BUDGET_S = 30.0
+RESOLVE_KEYS = (
+    "status",
+    "confidence",
+    "title",
+    "author",
+    "publisher",
+    "edition",
+    "isbn",
+    "year",
+    "source",
+    "url",
+    "volume_id",
+    "pages",
+)
 
 
 def _close_readings(
@@ -482,25 +496,7 @@ def resolve_books(
             r = replace(r, confidence=cap)
         entry: dict[str, Any] = {"track": b["track"], "readable": r is not None}
         if r is not None:
-            entry.update(
-                {
-                    k: getattr(r, k)
-                    for k in (
-                        "status",
-                        "confidence",
-                        "title",
-                        "author",
-                        "publisher",
-                        "edition",
-                        "isbn",
-                        "year",
-                        "source",
-                        "url",
-                        "volume_id",
-                        "pages",
-                    )
-                }
-            )
+            entry.update({k: getattr(r, k) for k in RESOLVE_KEYS})
             entry["evidence"] = dict(r.evidence)
             if from_single:
                 entry["evidence"]["matched_on_single_frame_reading"] = from_single
@@ -510,6 +506,68 @@ def resolve_books(
     data = {"books": out, "queries": len(results)}
     store.write_stage("resolve", data)
     return data
+
+
+def second_look(
+    store: SweepStore,
+    reg: Registrar,
+    det: dict[int, dict[str, Any]],
+    selected: list[FrameMeta],
+    read: dict[str, Any],
+    resolved: dict[str, Any],
+    resolver: Resolver,
+    s: Settings,
+    budget_s: float = VISION_READ_BUDGET_S,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A spine seen in several frames that the catalogue could not name from its OCR text (garbled gold print:
+    "IWO CTMPS | A TADEON | A TAIL OR") gets the vision model's copy of its text from its closest views, and that
+    copy is looked up once more. The same rules as for a single-frame reading apply: the match is capped below
+    the acceptance level, and a copy that names a book identified on another track, or holds another track's
+    whole spine, saw that neighbour and is not used."""
+    tracks = {t.id: t for t in reg.tracks}
+    metas = {m.seq: m for m in selected}
+    res_by = {r["track"]: r for r in resolved["books"]}
+    named = {r["track"]: r for r in resolved["books"] if r.get("title")}
+    spines = {b["track"]: b["spine_text"] for b in read["books"] if b["track"] in named}
+    cap = round(s.id_accept - 0.01, 3)
+    deadline = time.monotonic() + budget_s
+    resolver.deadline = deadline
+    for b in read["books"]:
+        t = tracks.get(b["track"])
+        r = res_by.get(b["track"], {})
+        if t is None or r.get("title") or b.get("text_source") == "vision-model":
+            continue
+        if len(t.observations) < VISION_READ_MIN_FRAMES or time.monotonic() > deadline - 8:
+            continue
+        others_spines = [x for k, x in spines.items() if k != b["track"]]
+        claimed = {_norm_title(str(x["title"])) for k, x in named.items() if k != b["track"]}
+        for copy in _vision_readings(store, t, det, metas, deadline):
+            if not _readable(copy) or holds_spine(copy, others_spines):
+                continue
+            try:
+                rv = resolver.resolve(copy, s.id_review)
+            except Exception:  # one lookup failing must not cost the packet
+                log.warning("second look lookup failed for track %s", b["track"], exc_info=True)
+                continue
+            if rv.status != "identified" or not rv.title or _norm_title(rv.title) in claimed:
+                continue
+            rv = replace(rv, confidence=min(rv.confidence, cap))
+            b["spine_text"], b["text_source"] = copy, "vision-model"
+            b["text_variants"] = list(dict.fromkeys([copy, *b.get("text_variants", [])]))[:5]
+            entry: dict[str, Any] = {"track": b["track"], "readable": True}
+            entry.update({k: getattr(rv, k) for k in RESOLVE_KEYS})
+            entry["evidence"] = {
+                **dict(rv.evidence),
+                "spine_text_from": "local vision model, second look (the OCR text matched no catalogue record)",
+            }
+            res_by[b["track"]] = entry
+            named[b["track"]] = entry
+            log.info("second look: track %s read %r -> %r (%.2f)", b["track"], copy, rv.title, rv.confidence)
+            break
+    resolved = {**resolved, "books": [res_by.get(b["track"], {"track": b["track"]}) for b in read["books"]]}
+    store.write_stage("read", read)
+    store.write_stage("resolve", resolved)
+    return read, resolved
 
 
 SINGLE_READINGS = 3

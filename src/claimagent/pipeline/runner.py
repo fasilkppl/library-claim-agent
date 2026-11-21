@@ -145,6 +145,20 @@ def run_pipeline(
     resolved = step(
         "resolve", lambda: stages.resolve_books(store, read, resolver, s, _left(t_all, RESERVE_AFTER_RESOLVE, 20, 70))
     )
+    read, resolved = step(
+        "second_look",
+        lambda: stages.second_look(
+            store,
+            reg,
+            det_books,
+            selected,
+            read,
+            resolved,
+            resolver,
+            s,
+            min(30.0, _left(t_all, RESERVE_AFTER_RESOLVE, 0, 30)),
+        ),
+    )
     # Where each spine was in each frame: two spines side by side in one frame are two books.
     boxes = {t.id: {o.seq: o.corners.tolist() for o in t.observations} for t in reg.tracks}
     read, resolved = step("dedupe", lambda: _dedupe(store, read, resolved, boxes))

@@ -219,3 +219,25 @@ def test_thickness_from_the_work_found_by_title_when_the_matched_record_has_no_p
 
     got = Resolver(_Http()).catalogue_thickness_cm("VOL1", title="The Lost Symbol", author="Dan Brown")
     assert got == (3.8, "639 pages (median of 3 Open Library editions)")
+
+
+def test_a_record_far_from_the_works_median_page_count_is_an_unusual_edition():
+    from claimagent.pipeline.resolve import Resolver, without_author_prefix
+
+    class _Resp:
+        def __init__(self, data):
+            self.data, self.status = data, 200
+
+    class _Http:
+        def get(self, url, params, source=""):
+            if "googleapis" in url:
+                return _Resp({"volumeInfo": {"pageCount": 87}})  # an abridged edition was matched
+            if url.endswith("search.json"):
+                return _Resp({"docs": [{"title": "A Tale of Two Cities", "number_of_pages_median": 388}]})
+            return _Resp(
+                {},
+            )
+
+    t, why = Resolver(_Http()).catalogue_thickness_cm("V", title="A Tale of Two Cities", author="Charles Dickens")
+    assert t == 2.4 and "unusual edition" in why
+    assert without_author_prefix("A Tale of Two Cities -", ["Charles Dickens"]) == "A Tale of Two Cities"

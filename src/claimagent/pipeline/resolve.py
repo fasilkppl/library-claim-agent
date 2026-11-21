@@ -129,6 +129,7 @@ OL_FIELDS = "key,title,subtitle,author_name,first_publish_year,isbn,publisher,ed
 PAGE_CM = 0.0055  # printed thickness per page (about 0.11 mm a sheet), for a spine estimated from its page count
 COVER_CM = 0.25  # both covers of a paperback together
 HARDCOVER_CM = 0.45  # both boards of a hardcover
+ODD_EDITION = 1.5  # a record's page count this far from the work's median is an unusual edition
 LIVE_QUERIES = 2  # during the walk: the two broadest queries only, so a title is said within seconds
 
 GLUE_WORDS = {"of", "the", "and", "to", "in", "on", "for", "with", "a", "an", "der", "die", "das", "und"}
@@ -152,6 +153,7 @@ def without_author_prefix(title: str, authors: list[str]) -> str:
     """Some catalogue records put the author's name before the title ("Dan Brown's the Lost Symbol"), so one
     book could be listed twice under two titles. Only a possessive of the book's own author is removed:
     "Ender's Game" (by Orson Scott Card) stays as it is."""
+    title = title.strip().rstrip(" -–—:;,/").strip()  # a stray separator ends some records: "A Tale of Two Cities -"
     m = re.match(r"^\s*((?:[\w.\-]+\s+){0,3}[\w.\-]+)['’]s\s+(\S.*)$", title)
     if not m:
         return title
@@ -582,7 +584,7 @@ class Resolver:
             # Some records carry the author in the title ("Go Set a Watchman by Harper Lee").
             m = re.search(r"\s+by\s+(.+)$", title, re.I)
             if m and any(s in content_tokens(m.group(1)) for s in surnames):
-                title = title[: m.start()].strip()
+                title = title[: m.start()].strip().rstrip(" -–—:;,/").strip()  # "A Tale of Two Cities - by ..."
             res.title, res.author = title, ", ".join(best.authors)
             res.source, res.url, res.volume_id = best.source, best.url, best.volume_id
             n = best.raw.get("number_of_pages_median") or best.raw.get("volumeInfo", {}).get("pageCount")
@@ -687,12 +689,21 @@ class Resolver:
         if check_deadline and self.deadline is not None and time.monotonic() > self.deadline:
             return None
         got = self._google_thickness(volume_id) if volume_id else None
+        one_record = got is not None
         if got is None and "openlibrary.org/works/" in work_url:
             got = self._openlibrary_thickness(work_url)
         if got is None and pages_hint and 40 <= pages_hint <= 1500:
             got = round(pages_hint * PAGE_CM + COVER_CM, 1), f"{pages_hint} pages (catalogue search record)"
-        if got is None and title:  # the matched record has no page count: the work found by title and author
-            got = self._openlibrary_search_thickness(title, author)
+            one_record = True
+        if title and (got is None or one_record):
+            # One record can be any edition of a much-printed book: an abridged one of 87 pages, or an omnibus of
+            # 990, was matched for A Tale of Two Cities. More than 1.5 times off the median over the work's
+            # editions, the record is set aside for that median.
+            work = self._openlibrary_search_thickness(title, author)
+            if got is None:
+                got = work
+            elif work is not None and max(got[0], work[0]) > ODD_EDITION * min(got[0], work[0]):
+                got = work[0], f"{work[1]}; the matched record ({got[1]}) is an unusual edition"
         return got
 
     def _openlibrary_search_thickness(self, title: str, author: str) -> tuple[float, str] | None:
