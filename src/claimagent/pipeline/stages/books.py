@@ -467,6 +467,11 @@ def resolve_books(
                 continue
             if holds_spine(v, others):
                 continue
+            # One frame is weak evidence: its match must name the author or explain more than half the reading
+            # (seen: "TWO SYPTES | A TAIL OR" named "Two Tails on the Trail", a different book, priced in the claim).
+            parts = rv.evidence.get("score_parts", {})
+            if not parts.get("author_hit") and float(parts.get("spine_cov", 0.0)) <= 0.5:
+                continue
             conf = min(rv.confidence, cap)
             if r is None or conf > r.confidence:
                 r = replace(rv, confidence=conf, status="identified" if conf >= s.id_review else "unidentified")
