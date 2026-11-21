@@ -425,6 +425,7 @@ def resolve_books(
                         "source",
                         "url",
                         "volume_id",
+                        "pages",
                     )
                 }
             )
@@ -564,7 +565,9 @@ def measure_books(
         h = resolver.catalogue_height_cm(
             r.get("volume_id", ""), r.get("title", ""), r.get("author", ""), r.get("url", "")
         )
-        return h, resolver.catalogue_thickness_cm(r.get("volume_id", ""), r.get("url", ""), check_deadline=False)
+        return h, resolver.catalogue_thickness_cm(
+            r.get("volume_id", ""), r.get("url", ""), check_deadline=False, pages_hint=r.get("pages")
+        )
 
     with ThreadPoolExecutor(max_workers=RULER_WORKERS) as pool:
         sizes = list(pool.map(catalogue_size, candidates))
@@ -639,6 +642,7 @@ def measure_books(
                     if diff > s.scale_disagreement:
                         checks.append(f"{name} scale disagrees by {diff:.0%}")
         cat = thick_cat.get(t.id)
+        photo_thick = thick
         if cat is not None:
             if thick is None or abs(thick - cat[0]) / cat[0] > THICK_DISAGREE:
                 measured = "none" if thick is None else f"{thick:.1f} cm"
@@ -653,6 +657,9 @@ def measure_books(
                 "track": t.id,
                 "spine_height_cm": None if height is None else round(height, 1),
                 "spine_thickness_cm": None if thick is None else round(thick, 1),
+                "photo_thickness_cm": None if photo_thick is None else round(photo_thick, 2),
+                "catalogue_thickness_cm": cat[0] if cat else None,
+                "catalogue_height_cm": ruler_h.get(t.id),
                 "scale_source": source,
                 "seg_len_px": round(seg_len, 1),
                 "seg_wid_px": round(seg_wid, 1),

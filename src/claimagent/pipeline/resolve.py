@@ -124,6 +124,8 @@ def english_words() -> frozenset[str]:
 
 
 GOOGLE_QUERIES_PER_TEXT = 6
+# number_of_pages_median: a page count for every match, for the thickness estimate (no extra lookup)
+OL_FIELDS = "key,title,subtitle,author_name,first_publish_year,isbn,publisher,edition_count,number_of_pages_median"
 PAGE_CM = 0.0055  # printed thickness per page (about 0.11 mm a sheet), for a spine estimated from its page count
 COVER_CM = 0.25  # both covers of a paperback together
 HARDCOVER_CM = 0.45  # both boards of a hardcover
@@ -320,6 +322,7 @@ class Resolution:
     source: str = ""
     url: str = ""
     volume_id: str = ""
+    pages: int | None = None  # the matched record's page count (Google volume, else Open Library's median)
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
@@ -426,7 +429,7 @@ class Resolver:
                 {
                     "q": q,
                     "limit": 8,
-                    "fields": "key,title,subtitle,author_name,first_publish_year,isbn,publisher,edition_count",
+                    "fields": OL_FIELDS,
                 },
                 source="openlibrary",
             )
@@ -535,6 +538,8 @@ class Resolver:
                 title = title[: m.start()].strip()
             res.title, res.author = title, ", ".join(best.authors)
             res.source, res.url, res.volume_id = best.source, best.url, best.volume_id
+            n = best.raw.get("number_of_pages_median") or best.raw.get("volumeInfo", {}).get("pageCount")
+            res.pages = int(n) if isinstance(n, int | float) and n > 0 else None
             # Edition only when the spine names the publisher of a specific catalogued edition.
             ed = self._edition(spine_text, best, [c for _, c in scored])
             if ed is not None:
@@ -621,7 +626,7 @@ class Resolver:
         return None
 
     def catalogue_thickness_cm(
-        self, volume_id: str, work_url: str = "", check_deadline: bool = True
+        self, volume_id: str, work_url: str = "", check_deadline: bool = True, pages_hint: int | None = None
     ) -> tuple[float, str] | None:
         """(thickness, where it comes from), estimated from the page count as printers size a spine (PAGE_CM a page
         plus the covers): the matched Google Books volume first, else the editions Open Library lists for the work.
@@ -631,6 +636,8 @@ class Resolver:
         got = self._google_thickness(volume_id) if volume_id else None
         if got is None and "openlibrary.org/works/" in work_url:
             got = self._openlibrary_thickness(work_url)
+        if got is None and pages_hint and 40 <= pages_hint <= 1500:
+            got = round(pages_hint * PAGE_CM + COVER_CM, 1), f"{pages_hint} pages (catalogue search record)"
         return got
 
     def _openlibrary_thickness(self, work_url: str) -> tuple[float, str] | None:
