@@ -194,8 +194,9 @@ def same_work(a: str, b: str) -> bool:
 
 
 def ocr_clean(text: str) -> str:
-    """Two common OCR slips on spines, repaired against a word list: one stray letter at the end of a word
-    ("GARDENX" -> garden, "HISTORYA" -> history) and a small word glued to the next ("SONGOF" -> song of).
+    """Three common OCR slips on spines, repaired against a word list: one stray letter at the end of a word
+    ("GARDENX" -> garden, "HISTORYA" -> history), a small word glued to the next ("SONGOF" -> song of), and a
+    long word misread in a letter or two ("AUTOBIEGRAPHY" -> autobiography) when exactly one word is that close.
     Anything else, names included, is kept as read; the result is only used as an extra catalogue query."""
     words = english_words()
     if not words:
@@ -213,8 +214,36 @@ def ocr_clean(text: str) -> str:
                     fixed = f"{low[: -len(glue)]} {glue}"
                 elif low.startswith(glue) and low[len(glue) :] in words and len(low) - len(glue) >= 3:
                     fixed = f"{glue} {low[len(glue) :]}"
+        if fixed is None and len(low) >= MISREAD_MIN_LEN:
+            fixed = _closest_word(low)
         out.append(fixed or tok)
     return "".join(out)
+
+
+MISREAD_MIN_LEN = 7  # shorter words have too many neighbours in the word list to repair safely
+
+
+@lru_cache(maxsize=1)
+def _words_by_length() -> dict[int, list[str]]:
+    out: dict[int, list[str]] = {}
+    for w in english_words():
+        out.setdefault(len(w), []).append(w)
+    return out
+
+
+def _closest_word(low: str) -> str | None:
+    """The one dictionary word within two letter edits (same first letter), or None when none or several are."""
+    near = [
+        w
+        for n in range(len(low) - 2, len(low) + 3)
+        for w in _words_by_length().get(n, [])
+        if w[0] == low[0] and Levenshtein.distance(low, w, score_cutoff=2) <= 2
+    ]
+    if not near:
+        return None
+    best = min(Levenshtein.distance(low, w) for w in near)
+    top = [w for w in near if Levenshtein.distance(low, w) == best]
+    return top[0] if len(top) == 1 else None
 
 
 def _covered_share(needed: list[str], pool: list[str]) -> float:
@@ -401,6 +430,11 @@ class Resolver:
         long_words = [w for w in content_tokens(spine_text) if len(w) >= 6][:3]
         if long_words:
             variants.append(" ".join(f"{w[:-1]}*" for w in long_words))
+        # Only the spine's dictionary words ("WINGS OF FIRE An Autobiegraphy | APJADdul" -> "wings fire"): every
+        # query above keeps a misread long word, which a catalogue matching whole words does not find.
+        plain = [w for w in content_tokens(ocr_clean(spine_text)) if w in english_words() and len(w) >= 3]
+        if len(plain) >= 2:
+            variants.append(" ".join(plain[:5]))
         # OCR misreads one letter in a word ("nacb" for "nach") and every query above contains it:
         # last resort, pairs of the longest words.
         longest = sorted(set(content_tokens(spine_text)), key=len, reverse=True)[:4]
