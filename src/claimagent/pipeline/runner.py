@@ -158,10 +158,10 @@ def run_pipeline(
         ),
     )
     items = step(
-        # At least 45 s for naming the items from their pictures: with 25 s the first check timed out and every
-        # item kept the detector's guess. The packet stays well inside the brief's 5 minutes.
+        # 60-90 s for naming the items from their pictures: with 25 s the first check timed out and every item kept
+        # the detector's guess; with 45 s a live sweep named 11 of 26. The packet stays inside the brief's 5 minutes.
         "items",
-        lambda: stages.collect_items(store, reg, det, selected, _left(t_all, RESERVE_AFTER_ITEMS, 45, 60)),
+        lambda: stages.collect_items(store, reg, det, selected, _left(t_all, RESERVE_AFTER_ITEMS, 60, 90)),
     )
     room = step("room", lambda: stages.measure_room(store, list(frames.values()), items, tracking))
 

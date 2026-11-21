@@ -51,7 +51,7 @@ FIXTURES = (
 # Whole words only, and only when the answer is not a contents word itself ("floor lamp", "ceiling fan").
 FIXTURE_RE = re.compile(r"\b(" + "|".join(re.escape(f) for f in FIXTURES) + r")\b")
 UNSURE = r"(unknown|unclear|not sure|cannot tell|can ?t tell|unsure|none|nothing)\b"
-BUDGET_S = 60.0
+BUDGET_S = 90.0  # most the item naming may take (the stage may give it less)
 CROP_PAD = 0.12
 TILE = 256  # px per photo in the grid; the model reads an image at a fixed cost, so one grid serves nine items
 GRID = 3
