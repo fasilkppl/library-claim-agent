@@ -130,7 +130,7 @@ def assign_rows(reg: Registrar) -> dict[int, RowInfo]:
 
 log = logging.getLogger(__name__)
 
-WIDTH_PERCENTILE = 30
+WIDTH_PERCENTILE = 10
 SHARP_ENOUGH = 100.0  # detail sharpness above which a view is not penalised when picking the clearest views
 NOT_BOOK_IOU = 0.6  # a spine box this much covered by another object's box is that object
 NOT_BOOK_SHARE = 0.3  # in this share of the spine's frames (detectors miss objects in some frames)
