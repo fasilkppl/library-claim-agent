@@ -189,3 +189,11 @@ def test_thickness_from_open_library_editions_when_there_is_no_google_volume():
     }
     got = Resolver(_Http(editions)).catalogue_thickness_cm("", "https://openlibrary.org/works/OL1W")
     assert got == (4.1, "656 pages (median of 3 Open Library editions)")  # mostly hardcover: 656 x 0.0055 + 0.45
+
+
+def test_a_first_name_glued_to_the_surname_still_names_the_author() -> None:
+    spine = "THE ALMANACK OF NAVAL RAVIKANT ERICJORGENSON"  # read on a real sweep
+    english, parts = score(spine, Candidate("The Almanack of Naval Ravikant", ["Eric Jorgenson"]))
+    spanish, _ = score(spine, Candidate("El Almanaque de Naval Ravikant", []))
+    assert parts["author_hit"] == 1.0 and not parts["unexplained"]
+    assert english > spanish  # the two used to tie, and the translation was listed first

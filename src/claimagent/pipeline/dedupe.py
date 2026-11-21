@@ -138,7 +138,13 @@ class _Book:
         # made on a leak would remove a real book.
         self.readings = [t for t in (tokens(read.get("spine_text", "")),) if t]
         self.tokens = list(dict.fromkeys(w for r in self.readings for w in r))
-        self.identified = res.get("status") in ("identified", "needs_appraisal") and bool(res.get("title"))
+        # A brief glimpse named only through one frame's reading is compared by what it reads, not by that
+        # title: seen on a real sweep, a 2-frame glimpse of "Principles of Building AI Agents" was named
+        # "Principle Agent" from one frame and counted as an eleventh book.
+        weak = int(read.get("observations", 0)) <= GLIMPSE_FRAMES and bool(
+            res.get("evidence", {}).get("matched_on_single_frame_reading")
+        )
+        self.identified = res.get("status") in ("identified", "needs_appraisal") and bool(res.get("title")) and not weak
         self.title = str(res.get("title", "")) if self.identified else ""
         self.work_tokens = tokens(f"{self.title} {res.get('author', '')}") if self.identified else []
 

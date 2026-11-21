@@ -18,6 +18,8 @@ from claimagent.config import Settings
 from claimagent.pipeline import geometry as geo
 from claimagent.pipeline import itemtrack
 from claimagent.pipeline.analyze import CROP_MIN_LENGTH_PX, read_spine_crop
+from claimagent.pipeline.dedupe import same_word
+from claimagent.pipeline.dedupe import tokens as dd_tokens
 from claimagent.pipeline.register import Registrar, Track
 from claimagent.pipeline.resolve import Resolver
 from claimagent.pipeline.stages.common import MARKER_SIDE_CM_DEFAULT, camera_of
@@ -393,16 +395,23 @@ def resolve_books(
         if consensus(b) in results and results[consensus(b)].title
     }
     cap = round(s.id_accept - 0.01, 3)
+    named_spines = {b["track"]: b["spine_text"] for b in read["books"] if b["track"] in by_consensus}
     out = []
     for b in read["books"]:
         r = results.get(consensus(b)) if consensus(b) else None
         claimed = {_norm_title(x.title) for k, x in by_consensus.items() if k != b["track"]}
+        # Only for a spine its own consensus did not name: when it did, a frame naming the same book is
+        # corroborated, and one naming another book still has to beat the consensus match.
+        own_named = r is not None and r.status == "identified"
+        others = [] if own_named else [t for k, t in named_spines.items() if k != b["track"]]
         from_single = ""
         for v in singles(b):
             rv = results.get(v)
             if rv is None:
                 continue
             if not rv.title or _norm_title(rv.title) in claimed:
+                continue
+            if holds_spine(v, others):
                 continue
             conf = min(rv.confidence, cap)
             if r is None or conf > r.confidence:
@@ -446,6 +455,18 @@ RULER_WORKERS = 6
 # An identified book's photo thickness further than this from its catalogue thickness gives way to the catalogue:
 # thin spines are a few pixels wide and their outlines spill onto neighbours (Patterns, 0.6 cm, measured 3.0).
 THICK_DISAGREE = 0.25
+
+
+def holds_spine(reading: str, spines: list[str]) -> bool:
+    """The reading holds the whole of one of these spine readings (two words or more, one slip per word): the
+    frame saw that spine too (an outline spanning two books). Seen on a real sweep: a frame of "A Tale of Two
+    Cities" also read "THE ALMANACK OF NAVAL RAVIKANT ERIC JORGENSON" and named the Tale "The Almanack"."""
+    got = dd_tokens(reading)
+    for spine in spines:
+        words = dd_tokens(spine)
+        if len(words) >= 2 and all(any(same_word(w, g) for g in got) for w in words):
+            return True
+    return False
 
 
 def _norm_title(title: str) -> str:
@@ -573,6 +594,7 @@ def measure_books(
         sizes = list(pool.map(catalogue_size, candidates))
     heights = [h for h, _ in sizes]
     thick_cat = {b["track"]: th for (b, _), (_, th) in zip(candidates, sizes, strict=True) if th is not None}
+    height_cat = {b["track"]: h for (b, _), h in zip(candidates, heights, strict=True) if h and 10 <= h <= 45}
     for (b, r), h_cm in zip(candidates, heights, strict=True):
         t = tracks[b["track"]]
         log.info("ruler candidate %s %r: catalogue height %s cm (%s)", t.id, r.get("title"), h_cm, t.orientation)
@@ -641,6 +663,11 @@ def measure_books(
                     diff = abs(alt - height) / height
                     if diff > s.scale_disagreement:
                         checks.append(f"{name} scale disagrees by {diff:.0%}")
+        if height is None and t.id in height_cat:
+            # No scale where this spine was seen (too few rulers in its frames and pass): its edition's height.
+            height = height_cat[t.id]
+            source = source or "catalogue-height"
+            checks.append("height from the catalogue; the photo gave none (no scale where this spine was seen)")
         cat = thick_cat.get(t.id)
         photo_thick = thick
         if cat is not None:

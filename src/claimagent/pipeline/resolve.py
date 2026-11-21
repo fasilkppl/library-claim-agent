@@ -272,8 +272,13 @@ def _author_match(authors: list[str], spine_text: str, title_toks: list[str]) ->
         if not toks or len(toks[-1]) < 3:
             continue
         surname, own = toks[-1], set(toks) | set(title_toks)
+        # OCR often glues the first name to the surname ("ERICJORGENSON"): the author's own full name.
+        glued = "".join(toks[-2:]) if len(toks) >= 2 else ""
         for line in lines:
             for i, tok in enumerate(line):
+                if glued and len(tok) > len(surname) + 2 and _hit(glued, [tok]):
+                    best = 1.0
+                    continue
                 if not _hit(surname, [tok]):
                     continue
                 before = line[i - 1] if i > 0 else ""
@@ -374,6 +379,7 @@ def _score(spine_text: str, cand: Candidate) -> tuple[float, dict[str, Any]]:
     title_cov = _covered_share(title_toks, spine)
     author_hit = _author_match(cand.authors, spine_text, title_toks)
     explained_pool = title_toks + [t for a in cand.authors for t in content_tokens(a)] + content_tokens(cand.publisher)
+    explained_pool += ["".join(content_tokens(a)[-2:]) for a in cand.authors if len(content_tokens(a)) >= 2]
     spine_cov = sum(_hit(t, explained_pool) for t in spine) / len(spine)
     s = 0.55 * title_cov + 0.25 * author_hit + 0.20 * spine_cov
     vs, vt = volume_numbers(spine_text), volume_numbers(cand.title)

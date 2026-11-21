@@ -245,3 +245,19 @@ def test_a_quick_glimpse_read_with_glued_words_joins_its_book():
     ]
     books, _, _ = run(shelf, [res(8, "The Almanack of Naval Ravikant", "Eric Jorgenson")])
     assert len(books) == 2
+
+
+def test_a_glimpse_named_from_one_frame_is_matched_by_what_it_reads():
+    # Real sweep: a 2-frame glimpse of this book was named "Principle Agent" from one frame and counted twice.
+    glimpse = book(3, "A", 1, "Principles of Builctno Al Apente", obs=2)
+    seen_well = book(27, "B", 1, "Sam Bhagwat | Principles of Building Al Agents", obs=10)
+    weak = {
+        **res(3, "Principle Agent", "Sarah Suzor", conf=0.65),
+        "evidence": {"matched_on_single_frame_reading": "Principles of bulateg Al Agente"},
+    }
+    good = res(27, "Principles of Building AI Agents", "Sam Bhagwat")
+    books, resolved, _ = run([glimpse, seen_well], [weak, good])
+    assert len(books) == 1 and resolved[0]["title"] == "Principles of Building AI Agents"
+    # Named by its own cross-frame reading, the same glimpse keeps its title and stays a book of its own.
+    books, _, _ = run([glimpse, seen_well], [res(3, "Principle Agent", "Sarah Suzor", conf=0.65), good])
+    assert len(books) == 2
