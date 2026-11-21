@@ -3,103 +3,227 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AR Depth Test</title>
+<title>AR Measure Test</title>
 <style>
-  :root { --bg: #0d1117; --fg: #e6edf3; --accent: #2f81f7; --warn: #d29922; --ok: #3fb950; }
+  :root { --bg: #0d1117; --fg: #e6edf3; --accent: #2f81f7; --warn: #d29922; --ok: #3fb950; --bad: #ff3b30; }
   body { margin: 0; font: 16px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
   main { padding: 16px; max-width: 640px; margin: 0 auto; }
-  button { font: inherit; font-weight: 600; padding: 14px 22px; border-radius: 999px; border: 0;
+  button { font: inherit; font-weight: 600; padding: 14px 20px; border-radius: 999px; border: 0;
            background: var(--accent); color: #fff; }
   #overlay { position: fixed; inset: 0; pointer-events: none; display: none; }
   body.ar #overlay { display: block; }
-  #panel { position: absolute; left: 12px; right: 12px; top: 12px; background: rgba(13,17,23,.78);
-           border-radius: 14px; padding: 12px 14px; font: 600 20px/1.35 ui-monospace, monospace; }
+  #panel { position: absolute; left: 12px; right: 12px; top: 12px; background: rgba(13,17,23,.8);
+           border-radius: 14px; padding: 12px 14px; font: 600 17px/1.4 ui-monospace, monospace; }
   #cross { position: absolute; left: 50%; top: 50%; width: 36px; height: 36px; margin: -18px 0 0 -18px;
-           border: 3px solid #ff3b30; border-radius: 50%; }
-  #stop { pointer-events: auto; position: absolute; bottom: 24px; left: 50%; transform: translateX(-50%); }
+           border: 3px solid var(--bad); border-radius: 50%; }
+  #cross.floor { border-color: var(--ok); } #cross.some { border-color: var(--warn); }
+  /* Middle of the right edge: Chrome's own "exit full screen" notice covers the top and bottom edges. */
+  #bar { pointer-events: auto; position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+         display: flex; flex-direction: column; gap: 16px; }
+  #bar button { min-width: 128px; padding: 18px 16px; }
+  #bar button.used { background: #6e7681; }
+  #stop { background: #da3633; }
   .ok { color: var(--ok); } .warn { color: var(--warn); }
-  ol { padding-left: 20px; }
+  .mode { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #30363d; font-weight: 600; }
+  ol { padding-left: 20px; } li { margin-bottom: 8px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>AR depth test</h1>
-  <p>Checks whether this phone's AR gives true distances. Results are logged on the Mac.</p>
-  <ol>
-    <li>Put a tape mark on the floor exactly <b>1 m</b> from a plain wall.</li>
-    <li>Tap Start. Move the phone slowly left and right for 5 seconds until it says <b>tracking</b>.</li>
-    <li>Stand on the mark, point the red circle at the wall, hold still 5 seconds.</li>
-    <li>Step back to <b>2 m</b>, hold still 5 seconds. Then tap Stop.</li>
-  </ol>
-  <button id="start">Start AR test</button>
+  <h1>AR measure test</h1>
+  <p>Mode: <span class="mode" id="mode"></span> · results are logged on the Mac.</p>
+  <ol id="steps"></ol>
+  <button id="start">Start</button>
   <p id="msg"></p>
 </main>
 <div id="overlay">
   <div id="panel">starting…</div>
   <div id="cross"></div>
-  <button id="stop">Stop</button>
+  <div id="bar"><button id="ptA">Point A</button><button id="ptB" class="used">Point B</button><button id="stop">Stop</button></div>
 </div>
 <script type="module">
+// Modes, so each possible cause can be ruled out on its own:
+//   full: depth + plane detection + hit-test + on-screen buttons (the heaviest)
+//   lite: hit-test + on-screen buttons only (no depth work in the page or in ARCore)
+//   bare: hit-test only, no on-screen buttons (no Chrome overlay); the circle is drawn in WebGL, taps mark points
+const MODE = ["full", "lite", "bare"].includes(new URLSearchParams(location.search).get("mode"))
+  ? new URLSearchParams(location.search).get("mode") : "full";
 const $ = (id) => document.getElementById(id);
-const post = (o) => fetch("/api/artest", { method: "POST", body: JSON.stringify(o) }).catch(() => {});
-let session = null;
+const post = (o) => fetch("/api/artest", { method: "POST", body: JSON.stringify({ mode: MODE, ...o }) }).catch(() => {});
+const r3 = (v) => (v == null ? null : +v.toFixed(3));
+const v3 = (p) => (p ? p.map(r3) : null);
+const dist = (a, b) => (a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : null);
+const fmt = (v) => (v == null ? "—" : v.toFixed(2) + " m");
+const buzz = (p) => { if (navigator.vibrate) navigator.vibrate(p); };
+let session = null, latest = null, pointA = null;
+const results = [];
+
+$("mode").textContent = MODE;
+const MOVE = "Point at the floor and <b>walk slowly sideways</b> one or two steps (moving, not only turning the phone) " +
+  "until the circle turns <b class='ok'>green</b>.";
+$("steps").innerHTML = MODE === "bare"
+  ? `<li>Tap Start. ${MOVE}</li><li>Circle green on the tape: <b>tap anywhere</b> on the screen (1 buzz = Point A).</li>` +
+    `<li>Circle green on the line where the wall meets the floor: tap again (2 buzzes = Point B). Do this 3 times.</li>` +
+    `<li>Press the phone's <b>Back</b> button to stop.</li>`
+  : `<li>Tap Start. ${MOVE}</li><li>Circle green on the tape: tap <b>Point A</b>.</li>` +
+    `<li>Circle green on the line where the wall meets the floor: tap <b>Point B</b>. Do this 3 times.</li>` +
+    `<li>Tap <b>Stop</b>.</li>`;
+
+// Depth at the circle: median of an 11 x 11 grid of samples around the screen centre (0 = no depth there).
+function depthPatch(di) {
+  const vals = [];
+  for (let i = 0; i <= 10; i++) for (let j = 0; j <= 10; j++) {
+    try { const d = di.getDepthInMeters(0.45 + i * 0.01, 0.45 + j * 0.01); if (d > 0) vals.push(d); } catch (e) {}
+  }
+  if (!vals.length) return { median: null, p10: null, p90: null, valid: 0 };
+  vals.sort((a, b) => a - b);
+  const q = (p) => vals[Math.min(vals.length - 1, Math.floor(p * vals.length))];
+  return { median: q(0.5), p10: q(0.1), p90: q(0.9), valid: vals.length / 121 };
+}
+
+function snapshot() {
+  const l = latest;
+  return { plane: v3(l.plane), depth: v3(l.depth), camera: v3(l.pos), depth_spread: l.dp ? r3(l.dp.p90 - l.dp.p10) : null };
+}
+
+function markA() {
+  if (!latest) return;
+  pointA = snapshot();
+  post({ event: "point_a", ...pointA });
+  buzz(60);
+  showNext();
+}
+function markB() {
+  if (!latest || !pointA) return;
+  const b = snapshot();
+  const res = { plane_m: dist(pointA.plane, b.plane), depth_m: dist(pointA.depth, b.depth),
+                camera_moved_m: dist(pointA.camera, b.camera) };
+  results.unshift(res);
+  post({ event: "measure", n: results.length, plane_m: r3(res.plane_m), depth_m: r3(res.depth_m),
+         camera_moved_m: r3(res.camera_moved_m), a: pointA, b });
+  pointA = null;
+  buzz([60, 80, 60]);
+  showNext();
+}
+// The button to press next is blue, the one just pressed turns grey.
+function showNext() {
+  $("ptA").className = pointA ? "used" : "";
+  $("ptB").className = pointA ? "" : "used";
+}
+
+// bare mode: a screen-fixed ring drawn with WebGL, green when the floor is under it.
+function makeRing(gl) {
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, "attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); gl_PointSize = 120.0; }"));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, "precision mediump float; uniform vec3 c; void main(){ float r = length(gl_PointCoord - 0.5);" +
+    " if (r > 0.5 || r < 0.38) discard; gl_FragColor = vec4(c, 1.0); }"));
+  gl.linkProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, "p"), col = gl.getUniformLocation(prog, "c");
+  return (views, layer, green) => {
+    gl.useProgram(prog);
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.enableVertexAttribArray(loc);
+    gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+    gl.uniform3f(col, green ? 0.25 : 1.0, green ? 0.73 : 0.23, green ? 0.31 : 0.19);
+    for (const v of views) { const vp = layer.getViewport(v); gl.viewport(vp.x, vp.y, vp.width, vp.height); gl.drawArrays(gl.POINTS, 0, 1); }
+  };
+}
 
 $("start").onclick = async () => {
+  const opts = MODE === "full"
+    ? { requiredFeatures: ["local-floor"], optionalFeatures: ["depth-sensing", "hit-test", "dom-overlay", "plane-detection"],
+        depthSensing: { usagePreference: ["cpu-optimized"], dataFormatPreference: ["luminance-alpha", "float32"] },
+        domOverlay: { root: $("overlay") } }
+    : MODE === "lite"
+      ? { requiredFeatures: ["local", "hit-test"], optionalFeatures: ["dom-overlay"], domOverlay: { root: $("overlay") } }
+      : { requiredFeatures: ["local", "hit-test"] };
   try {
     if (!navigator.xr || !(await navigator.xr.isSessionSupported("immersive-ar"))) {
       $("msg").textContent = "This browser says AR is not supported."; post({ event: "unsupported" }); return;
     }
-    session = await navigator.xr.requestSession("immersive-ar", {
-      requiredFeatures: ["local-floor"],
-      optionalFeatures: ["depth-sensing", "hit-test", "dom-overlay"],
-      depthSensing: { usagePreference: ["cpu-optimized"], dataFormatPreference: ["luminance-alpha", "float32"] },
-      domOverlay: { root: $("overlay") },
-    });
+    session = await navigator.xr.requestSession("immersive-ar", opts);
   } catch (e) { $("msg").textContent = "Could not start AR: " + e; post({ event: "start_failed", error: String(e) }); return; }
-  document.body.classList.add("ar");
-  post({ event: "started", features: [...(session.enabledFeatures || [])], depthUsage: session.depthUsage,
+  if (MODE !== "bare") document.body.classList.add("ar");
+  post({ event: "started", version: 3, features: [...(session.enabledFeatures || [])], depthUsage: session.depthUsage,
          depthFormat: session.depthDataFormat, ua: navigator.userAgent });
-  const gl = document.createElement("canvas").getContext("webgl2", { xrCompatible: true });
+  const gl = document.createElement("canvas").getContext("webgl", { xrCompatible: true });
   await session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
-  const ref = await session.requestReferenceSpace("local-floor");
-  let hitSource = null;
-  try { hitSource = await session.requestHitTestSource({ space: await session.requestReferenceSpace("viewer") }); }
-  catch (e) { post({ event: "no_hit_test", error: String(e) }); }
-  let start = null, lastPost = 0, t0 = performance.now();
+  const ref = await session.requestReferenceSpace(MODE === "full" ? "local-floor" : "local");
+  const viewer = await session.requestReferenceSpace("viewer");
+  let hitSrc = null;
+  try { hitSrc = await session.requestHitTestSource({ space: viewer }); }
+  catch (e) { post({ event: "no_hit_source", error: String(e) }); }
+  const ring = MODE === "bare" ? makeRing(gl) : null;
+  if (MODE === "bare") session.addEventListener("select", () => (pointA ? markB() : markA()));
+  let floorFound = false, depthNull = 0, lastPost = 0, lastPanel = 0, lastT = 0, frames = 0, frameMsSum = 0;
+  const t0 = performance.now();
+
   const onFrame = (t, frame) => {
     session.requestAnimationFrame(onFrame);
+    if (lastT) { frames++; frameMsSum += t - lastT; }
+    lastT = t;
     const layer = session.renderState.baseLayer;
     gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer); gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
     const pose = frame.getViewerPose(ref);
-    if (!pose) { $("panel").innerHTML = '<span class="warn">no pose yet: move slowly</span>'; return; }
-    const p = pose.transform.position;
-    start = start || [p.x, p.y, p.z];
-    const moved = Math.hypot(p.x - start[0], p.y - start[1], p.z - start[2]);
-    let depth = null, dInfo = null;
-    try {
-      const di = frame.getDepthInformation(pose.views[0]);
-      if (di) { depth = di.getDepthInMeters(0.5, 0.5); dInfo = { w: di.width, h: di.height, raw: di.rawValueToMeters }; }
-    } catch (e) { dInfo = { error: String(e) }; }
-    let hit = null;
-    if (hitSource) {
-      const r = frame.getHitTestResults(hitSource);
-      if (r.length) { const h = r[0].getPose(ref).transform.position; hit = Math.hypot(h.x - p.x, h.y - p.y, h.z - p.z); }
+    if (!pose) { if (MODE !== "bare") $("panel").innerHTML = '<span class="warn">no pose yet: move slowly</span>'; return; }
+    const view = pose.views[0];
+    const p = view.transform.position, m = view.transform.matrix;
+    const pos = [p.x, p.y, p.z], fwd = [-m[8], -m[9], -m[10]]; // the camera looks along its -Z axis
+    let plane = null;
+    if (hitSrc) {
+      const r = frame.getHitTestResults(hitSrc);
+      const hp = r.length ? r[0].getPose(ref) : null;
+      if (hp) plane = [hp.transform.position.x, hp.transform.position.y, hp.transform.position.z];
     }
-    const tracking = !pose.emulatedPosition;
-    const f = (v) => (v == null ? "—" : v.toFixed(2) + " m");
-    $("panel").innerHTML =
-      `<span class="${tracking ? "ok" : "warn"}">${tracking ? "tracking" : "tracking LOST"}</span><br>` +
-      `depth at circle: ${f(depth)}<br>plane distance: ${f(hit)}<br>phone height: ${f(p.y)}<br>moved: ${f(moved)}`;
+    let dp = null, depth = null, depthErr = null;
+    if (MODE === "full") {
+      try {
+        const di = frame.getDepthInformation(view);
+        if (di) { dp = depthPatch(di); if (dp.median) depth = pos.map((c, k) => c + fwd[k] * dp.median); }
+        else depthNull++;
+      } catch (e) { depthErr = String(e); }
+    }
+    floorFound = floorFound || !!plane;
+    latest = { pos, plane, depth, dp, tracking: !pose.emulatedPosition };
+    if (ring) ring(pose.views, layer, !!plane);
+    if (MODE !== "bare" && t - lastPanel > 250) {
+      lastPanel = t;
+      $("cross").className = plane ? "floor" : depth ? "some" : "";
+      const last = results[0];
+      $("panel").innerHTML =
+        (floorFound ? '<span class="ok">floor found</span>' : '<span class="warn">point at the floor, walk sideways slowly</span>') +
+        (latest.tracking ? "" : ' <span class="warn">tracking lost</span>') +
+        `<br>floor ${fmt(dist(pos, plane))}` + (MODE === "full" ? ` · depth ${fmt(dp && dp.median)}` : "") +
+        `<br>${pointA ? "A set: aim at B, tap Point B" : "aim, tap Point A"}` +
+        (last ? `<br>#${results.length} A→B: ${fmt(last.plane_m)}` + (MODE === "full" ? ` · depth ${fmt(last.depth_m)}` : "") : "");
+    }
     if (t - lastPost > 500) {
       lastPost = t;
-      post({ t: Math.round(t - t0), tracking, x: +p.x.toFixed(3), y: +p.y.toFixed(3), z: +p.z.toFixed(3),
-             moved: +moved.toFixed(3), depth_centre: depth == null ? null : +depth.toFixed(3),
-             hit_distance: hit == null ? null : +hit.toFixed(3), depth_info: dInfo });
+      post({ t: Math.round(t - t0), tracking: latest.tracking, pos: v3(pos), plane_d: r3(dist(pos, plane)),
+             plane_y: plane ? r3(plane[1]) : null, depth_med: dp ? r3(dp.median) : null,
+             depth_spread: dp && dp.median ? r3(dp.p90 - dp.p10) : null, depth_null_frames: depthNull, depth_error: depthErr,
+             planes: frame.detectedPlanes ? frame.detectedPlanes.size : null,
+             frame_ms: frames ? r3(frameMsSum / frames) : null });
+      frames = 0; frameMsSum = 0;
     }
   };
   session.requestAnimationFrame(onFrame);
-  session.addEventListener("end", () => { document.body.classList.remove("ar"); post({ event: "ended" }); });
+  // Switching to another app pauses the session; logged so a gap in the samples is explained.
+  session.addEventListener("visibilitychange", () => post({ event: "visibility", state: session.visibilityState }));
+  session.addEventListener("end", () => {
+    document.body.classList.remove("ar");
+    post({ event: "ended", measurements: results.length });
+  });
 };
+
+// Taps on the buttons must not also count as taps on the AR scene.
+$("bar").addEventListener("beforexrselect", (e) => e.preventDefault());
+$("ptA").onclick = markA;
+$("ptB").onclick = markB;
 $("stop").onclick = () => session && session.end();
 </script>
 </body>

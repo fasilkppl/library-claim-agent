@@ -135,6 +135,18 @@ class Coach:
         unreadable = [sp for sp in spines if not sp.get("text") and sp["length"] >= UNREADABLE_MIN_LENGTH_PX]
         sharp = qd["book_sharpness"] > self.s.blur_min
         st.unreadable_run = st.unreadable_run + 1 if sharp and len(unreadable) >= 2 else 0
+        log.debug(
+            "coach frame %s step=%s spines=%d unreadable=%d sharp=%.0f glare=%.3f runs blur/glare/unread=%d/%d/%d",
+            d.get("seq"),
+            step,
+            len(spines),
+            len(unreadable),
+            qd["book_sharpness"],
+            qd["book_glare"],
+            st.blurry_run,
+            st.glare_run,
+            st.unreadable_run,
+        )
         if st.unreadable_run >= 3:
             self.hint("closer", "Step a little closer to these books, I can't read some of the spines yet.")
         if len(spines) >= 6:

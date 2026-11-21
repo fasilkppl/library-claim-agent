@@ -11,3 +11,5 @@ sweeps/*
 .mypy_cache/
 .ruff_cache/
 weights/
+# submission bundles hold room photos, like sweeps/
+submission/

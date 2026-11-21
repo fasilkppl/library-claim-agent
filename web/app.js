@@ -18,7 +18,7 @@ function onJson(m) {
     case "user_text": log(`You: ${m.text}`, "u"); break;
     case "hint": hint(m.text); break;
     case "locale": setLocale(m.country, m.currency); break;
-    case "tool": log(`[recorded ${m.name}]`, "s"); break;
+    case "tool": log(`[recorded ${m.name}]`, "s"); if (m.name === "set_locale") releaseStart(); break;
     case "audio_stop": stopPlayback(); break;
     case "inventory": renderInventory(m); break;
     case "guide": renderGuide(m, (action) => sendJson({ type: "guide", action })); break;
@@ -58,9 +58,25 @@ $("btnConnect").onclick = async () => {
                device: navigator.userAgent, capture_mode: arSupported ? "webxr" : "camera",
                marker_side_cm: $("chkMarker").checked ? MARKER_CM : null });
     setPhase("connected", { ar: arSupported });
+    holdStartUntilAnswered();
     if (!arSupported) log("Camera sweep (AR off): the room is not measured.", "s");
   } catch (e) { status(`Could not start: ${e}`); $("btnConnect").disabled = false; }
 };
+
+// The agent first asks to confirm the country and currency; the sweep buttons wait for that answer (or 20 s, so a
+// misheard answer never blocks the sweep).
+let introDone = false, introTimer = null;
+function holdStartUntilAnswered() {
+  for (const id of ["btnAR", "btnCam"]) $(id).disabled = true;
+  status("Answer the agent first: are the country and currency right?");
+  introTimer = setTimeout(releaseStart, 20000);
+}
+function releaseStart() {
+  if (introDone) return;
+  introDone = true; clearTimeout(introTimer);
+  for (const id of ["btnAR", "btnCam"]) $(id).disabled = $(id).hidden;
+  status("Press start when you're ready.");
+}
 
 async function begin(kind) {
   setPhase("sweeping");

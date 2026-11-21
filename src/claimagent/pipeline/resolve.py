@@ -143,17 +143,40 @@ ABOUT_A_BOOK = re.compile(
 )
 
 
+def without_author_prefix(title: str, authors: list[str]) -> str:
+    """Some catalogue records put the author's name before the title ("Dan Brown's the Lost Symbol"), so one
+    book could be listed twice under two titles. Only a possessive of the book's own author is removed:
+    "Ender's Game" (by Orson Scott Card) stays as it is."""
+    m = re.match(r"^\s*((?:[\w.\-]+\s+){0,3}[\w.\-]+)['’]s\s+(\S.*)$", title)
+    if not m:
+        return title
+    names = {w for a in authors for w in content_tokens(a)}
+    prefix = content_tokens(m.group(1))
+    if not prefix or not all(w in names for w in prefix):
+        return title
+    rest = m.group(2)
+    return rest[:1].upper() + rest[1:]
+
+
 def derivative(c: Candidate) -> bool:
-    """The record is a book about another book (summary, trivia, study guide), not the book. Signs: such words
-    in its title or author, or a title ending "by <name>" where that name is not one of its own authors."""
+    """The record is a book about another book (summary, trivia, study guide, parody), not the book. Signs: such
+    words in its title or author; a title ending "by <name>", or starting "<First Last>'s" (a full name:
+    "Dan Brown's the Lost Symbol" by Nigel Tomm), where that name is not one of its own authors. A one-word
+    possessive is part of many real titles ("Ender's Game", "Charlotte's Web") and is not a sign."""
     authors = " ".join(c.authors)
     if ABOUT_A_BOOK.search(c.title) or ABOUT_A_BOOK.search(authors) or re.search(r"\bstaff\b", authors, re.I):
         return True
+    own = {t for a in c.authors for t in content_tokens(a)}
     m = re.search(r"\s+by\s+(.+)$", c.title, re.I)
     if m:
         named = set(content_tokens(m.group(1)))
-        own = {t for a in c.authors for t in content_tokens(a)}
         if named and not (named & own):
+            return True
+    m = re.match(r"^\s*((?:[A-Z][\w.\-]*\s+){1,2}[A-Z][\w.\-]*)['’]s\s", c.title)
+    if m:
+        words = content_tokens(m.group(1))
+        # Every word must be a name word: "The Handmaid's Tale" or "My Brother's Keeper" is not a name.
+        if len(words) == len(m.group(1).split()) and not (set(words) & own):
             return True
     return False
 
@@ -407,7 +430,7 @@ class Resolver:
             for d in (r.data or {}).get("docs", [])[:8]:
                 out.append(
                     Candidate(
-                        title=d.get("title", ""),
+                        title=without_author_prefix(d.get("title", ""), d.get("author_name", [])[:3]),
                         authors=d.get("author_name", [])[:3],
                         publisher=", ".join(d.get("publisher", [])[:5]),
                         year=d.get("first_publish_year"),
@@ -433,7 +456,10 @@ class Resolver:
                 year = _year(vi.get("publishedDate", ""))
                 out.append(
                     Candidate(
-                        title=vi.get("title", "") + (f": {vi['subtitle']}" if vi.get("subtitle") else ""),
+                        title=without_author_prefix(
+                            vi.get("title", "") + (f": {vi['subtitle']}" if vi.get("subtitle") else ""),
+                            vi.get("authors", [])[:3],
+                        ),
                         authors=vi.get("authors", [])[:3],
                         publisher=vi.get("publisher", ""),
                         year=year,

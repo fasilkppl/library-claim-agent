@@ -112,3 +112,29 @@ def test_study_notes_are_not_the_book():
 
     assert derivative(Candidate(title="Charles Dickens: A Tale of Two Cities: Notes", authors=["George Taylor"]))
     assert not derivative(Candidate(title="Notes from Underground", authors=["Fyodor Dostoyevsky"]))
+
+
+def test_author_possessive_before_the_title_is_removed() -> None:
+    from claimagent.pipeline.resolve import without_author_prefix
+
+    # Seen on sweep 20261120-124155: one Lost Symbol came back under this title and was counted twice.
+    assert without_author_prefix("Dan Brown's the Lost Symbol", ["Dan Brown"]) == "The Lost Symbol"
+    assert without_author_prefix("Brown's The Lost Symbol", ["Dan Brown"]) == "The Lost Symbol"
+    # A possessive that is part of the real title, or another person's name, stays.
+    assert without_author_prefix("Ender's Game", ["Orson Scott Card"]) == "Ender's Game"
+    assert without_author_prefix("The Handmaid's Tale", ["Margaret Atwood"]) == "The Handmaid's Tale"
+    assert (
+        without_author_prefix("Agatha Christie's Secret Notebooks", ["John Curran"])
+        == "Agatha Christie's Secret Notebooks"
+    )
+
+
+def test_a_full_name_possessive_by_another_author_is_a_book_about_the_book() -> None:
+    from claimagent.pipeline.resolve import Candidate, derivative
+
+    # Seen on sweep 20261120-124155: a parody record was taken for the novel and the book counted twice.
+    assert derivative(Candidate(title="Dan Brown's the Lost Symbol", authors=["Nigel Tomm"]))
+    assert not derivative(Candidate(title="Dan Brown's The Lost Symbol", authors=["Dan Brown"]))
+    assert not derivative(Candidate(title="Ender's Game", authors=["Orson Scott Card"]))
+    assert not derivative(Candidate(title="Charlotte's Web", authors=["E. B. White"]))
+    assert not derivative(Candidate(title="The Handmaid's Tale", authors=["Margaret Atwood"]))

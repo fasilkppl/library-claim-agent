@@ -55,6 +55,10 @@ BUDGET_S = 60.0
 CROP_PAD = 0.12
 TILE = 256  # px per photo in the grid; the model reads an image at a fixed cost, so one grid serves nine items
 GRID = 3
+# A crop flatter than this at tile size (Laplacian variance) shows nothing nameable: a dark corner, a reflection,
+# a hole in a table. The vision model still names such crops confidently ("coffee maker", "coaster"), so they are
+# not asked. On three practice sweeps every real item scored 32 or more and 6 of 15 such crops scored under 12.
+MIN_TILE_DETAIL = 15.0
 
 
 def _mosaic(crops: list[np.ndarray]) -> np.ndarray:
@@ -73,6 +77,13 @@ def _mosaic(crops: list[np.ndarray]) -> np.ndarray:
     return sheet
 
 
+def tile_detail(crop: np.ndarray) -> float:
+    """Laplacian variance of the crop at the size the model sees it (its tile in the grid)."""
+    s = (TILE - 16) / max(crop.shape[:2])
+    c = cv2.resize(crop, (max(1, int(crop.shape[1] * s)), max(1, int(crop.shape[0] * s))), interpolation=cv2.INTER_AREA)
+    return float(cv2.Laplacian(cv2.cvtColor(c, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+
+
 def _ask(crops: list[np.ndarray], timeout: float) -> list[str]:
     """One answer per crop (empty when the model gave none for that number)."""
     s = get_settings()
@@ -86,6 +97,7 @@ def _ask(crops: list[np.ndarray], timeout: float) -> list[str]:
             "model": s.llm_model,
             "stream": False,
             "think": False,
+            "keep_alive": "60m",  # as the live calls: the model stays loaded for the next sweep
             "options": {"temperature": 0, "num_predict": 12 * len(crops)},
             "messages": [{"role": "user", "content": PROMPT, "images": [base64.b64encode(buf).decode()]}],
         },
@@ -99,6 +111,16 @@ def _ask(crops: list[np.ndarray], timeout: float) -> list[str]:
     return answers
 
 
+def _contents(text: str) -> tuple[str, str, bool] | None:
+    """The contents word the text spells, with a space or a letter off allowed ("door mat"); None otherwise."""
+    if FIXTURE_RE.fullmatch(text):
+        return None
+    if text in CATEGORY:
+        return text, CATEGORY[text], False
+    best = max(ITEM_VOCAB, key=lambda v: fuzz.ratio(text, v))
+    return (best, CATEGORY[best], False) if fuzz.ratio(text, best) >= 90 else None
+
+
 def canonical(answer: str) -> tuple[str, str, bool] | None:
     """(label, category, is_fixture) for the model's answer; None when it could not tell."""
     words = answer.split()
@@ -107,7 +129,9 @@ def canonical(answer: str) -> tuple[str, str, bool] | None:
     if answer in CATEGORY:  # a known contents word first: "floor lamp", "wall clock" are not fixtures
         return answer, CATEGORY[answer], False
     if FIXTURE_RE.search(answer):
-        return answer, "fixture", True
+        # A building word in front of a contents word names the contents: "door mat", "wall mirror".
+        named = _contents(answer) or _contents(words[-1])
+        return named if named is not None else (answer, "fixture", True)
     if re.fullmatch(r"(a )?(stack of |pile of )?books?", answer):
         return answer, "book", True  # books are counted in the book list, not as items
     best = max(ITEM_VOCAB, key=lambda v: fuzz.token_set_ratio(answer, v))
@@ -116,10 +140,61 @@ def canonical(answer: str) -> tuple[str, str, bool] | None:
     return answer, "other", False
 
 
+FURNITURE = {"desk", "dining table", "table", "coffee table"}  # things books stand on
+
+
+def _area(b: Any) -> float:
+    return max(0.0, float(b[2]) - float(b[0])) * max(0.0, float(b[3]) - float(b[1]))
+
+
+HOLDERS = {"table", "shelving", "seating", "rug"}  # categories things stand on or in: inside them is not part of them
+
+
+def parts_of_other_items(items: list[dict[str, Any]]) -> dict[str, str]:
+    """Item id -> the item it is a part of: its box lies (80%+) inside a box at least twice its size that another
+    item has in the same frame. A print on a gift box ("kite", "lantern") or a pan's handle is not an object; a
+    padlock on a table is (furniture and mats hold things, so they are never the owner)."""
+    out: dict[str, str] = {}
+    for a in items:
+        ab = a["bbox"]
+        for b in items:
+            bb = (b.get("boxes") or {}).get(str(a["frame_seq"]))
+            if b is a or bb is None or b.get("category") in HOLDERS or _area(bb) < 2 * _area(ab):
+                continue
+            ix = max(0.0, min(ab[2], bb[2]) - max(ab[0], bb[0]))
+            iy = max(0.0, min(ab[3], bb[3]) - max(ab[1], bb[1]))
+            if _area(ab) > 0 and ix * iy / _area(ab) >= 0.8:
+                out[a["id"]] = b["label"]
+                break
+    return out
+
+
+def spine_cover(box: Any, spine_boxes: list[Any]) -> float:
+    """Share of the box covered by detected book spines (overlaps summed, at most 1)."""
+    a = _area(box)
+    if a <= 0:
+        return 0.0
+    hit = 0.0
+    for s in spine_boxes:
+        ix = max(0.0, min(box[2], s[2]) - max(box[0], s[0]))
+        iy = max(0.0, min(box[3], s[3]) - max(box[1], s[1]))
+        hit += ix * iy
+    return min(1.0, hit / a)
+
+
 def name_items(
-    items: list[dict[str, Any]], images: dict[int, np.ndarray], budget_s: float = BUDGET_S
+    items: list[dict[str, Any]],
+    images: dict[int, np.ndarray],
+    budget_s: float = BUDGET_S,
+    spines: dict[int, list[Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Renames items in place from the model's answers; returns the items removed as building fixtures."""
+    """Renames items in place from the model's answers; returns the items removed (building fixtures, books, parts
+    of other items). `spines`: the spine boxes detected in each frame, the evidence for an answer "book"."""
+    removed: list[dict[str, Any]] = []
+    for iid, owner in parts_of_other_items(items).items():
+        it = next(x for x in items if x["id"] == iid)
+        items.remove(it)
+        removed.append({"id": iid, "detector_label": it["label"], "seen_as": f"part of the {owner}"})
     jobs: list[tuple[dict[str, Any], np.ndarray]] = []
     for it in items:
         img = images.get(it["frame_seq"])
@@ -129,8 +204,10 @@ def name_items(
         px, py = (x1 - x0) * CROP_PAD, (y1 - y0) * CROP_PAD
         crop = img[max(0, int(y0 - py)) : int(y1 + py), max(0, int(x0 - px)) : int(x1 + px)]
         if crop.size and min(crop.shape[:2]) >= 24:
+            if tile_detail(crop) < MIN_TILE_DETAIL:
+                it["vision_check"] = "unknown"  # too little detail to name: listed, not priced, sent to review
+                continue
             jobs.append((it, crop))
-    removed: list[dict[str, Any]] = []
     deadline = time.monotonic() + min(BUDGET_S, budget_s)
     batch = GRID * GRID
     for start in range(0, len(jobs), batch):
@@ -149,11 +226,18 @@ def name_items(
             if named is None:
                 continue
             label, category, fixture = named
-            if fixture and category == "book" and it.get("room_step"):
-                # Shown while panning the room, not the shelves: an object called "book" here is a misnaming
-                # (a water bottle seen next to the shelf); the detector's name stays.
-                it["vision_check"] = f"{answer} (ignored: room part of the walk)"
+            if fixture and it["label"] in FURNITURE and (category == "book" or label == "floor"):
+                # The detector found a table and the model saw the books standing on it (or its top, like a
+                # floor): the table is still there.
+                it["vision_check"] = f"{answer} (kept: books stand on the {it['label']})"
                 continue
+            if fixture and category == "book":
+                cover = None if spines is None else spine_cover(it["bbox"], spines.get(it["frame_seq"], []))
+                if (cover is None and it.get("room_step")) or (cover is not None and cover < 0.5):
+                    # Called a book where no spine was detected (a water bottle next to the shelf): not a book,
+                    # but not named either, so it is listed unpriced for review.
+                    it["vision_check"] = "unknown"
+                    continue
             if fixture:  # a part of the building, or a book (counted in the book list)
                 items.remove(it)
                 removed.append({"id": it["id"], "detector_label": it["label"], "seen_as": label})

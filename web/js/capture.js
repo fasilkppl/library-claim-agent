@@ -150,15 +150,31 @@ function onMotion(e) {
   gravity = [g.x * Math.cos(a) - g.y * Math.sin(a), g.x * Math.sin(a) + g.y * Math.cos(a), g.z];
 }
 
+// Chrome lists some phones' back cameras telephoto first (OnePlus 15: camera 4, 3, 2, 0) and "environment" opens
+// the first one: a 3.4x lens that cannot focus closer than 40 cm. Android numbers the main back camera lowest.
+async function mainBackCamera() {
+  const back = (await navigator.mediaDevices.enumerateDevices())
+    .filter((d) => d.kind === "videoinput" && /back|rear|environment/i.test(d.label))
+    .map((d) => ({ d, n: Number((d.label.match(/camera2? (\d+)/) || [])[1]) }))
+    .filter((x) => Number.isFinite(x.n))
+    .sort((a, b) => a.n - b.n);
+  return back.length ? back[0].d : null;
+}
+
 export async function startCamera() {
   // Full resolution with continuous autofocus where the browser supports it (the AR camera stream has neither).
   // The full 4:3 sensor at 30 fps: a 16:9 or 60 fps stream is a crop of the sensor and looks zoomed in.
-  camStream = await navigator.mediaDevices.getUserMedia({
-    video: {
-      facingMode: "environment", aspectRatio: { ideal: 4 / 3 }, width: { ideal: 1920 }, height: { ideal: 1440 },
-      frameRate: { ideal: 30, max: 30 }, advanced: [{ focusMode: "continuous" }],
-    },
-  });
+  const video = {
+    aspectRatio: { ideal: 4 / 3 }, width: { ideal: 1920 }, height: { ideal: 1440 },
+    frameRate: { ideal: 30, max: 30 }, advanced: [{ focusMode: "continuous" }],
+  };
+  camStream = await navigator.mediaDevices.getUserMedia({ video: { ...video, facingMode: "environment" } });
+  // Camera names are readable once the camera is allowed: reopen on the main lens if Chrome chose another one.
+  const main = await mainBackCamera().catch(() => null);
+  if (main && camStream.getVideoTracks()[0].getSettings().deviceId !== main.deviceId) {
+    camStream.getTracks().forEach((t) => t.stop());
+    camStream = await navigator.mediaDevices.getUserMedia({ video: { ...video, deviceId: { exact: main.deviceId } } });
+  }
   const camTrack = camStream.getVideoTracks()[0];
   try {
     const caps = camTrack.getCapabilities ? camTrack.getCapabilities() : {};

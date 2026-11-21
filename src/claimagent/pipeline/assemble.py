@@ -46,7 +46,6 @@ ASSUMPTIONS = [
 ]
 
 log = logging.getLogger(__name__)
-UNSURE_ITEM_CONF = 0.6  # below this detector confidence, an item the vision model could not name is not priced
 PRICE_WORKERS = 8  # price lookups in parallel: each waits on a shopping search, not on this machine
 
 
@@ -65,6 +64,19 @@ def _book_price(fig: PriceFigure, used: bool) -> BookPrice:
         offers_used=fig.offers_used,
         note=fig.note,
     )
+
+
+def item_price_status(it: dict[str, Any], vision_check_on: bool) -> str:
+    """Returns "unpriced" when nothing confirms what the item is, else "range" (art is decided afterwards)."""
+    if it.get("vision_check") == "unknown":
+        # The vision model could not tell what it is: pricing the detector's guess (a pressure cooker called a
+        # "cup", a dark corner an "electric kettle") would put a wrong product in the claim.
+        return "unpriced"
+    if vision_check_on and "vision_check" not in it:
+        # The picture check did not reach this item in its time: the detector's name alone (a gift box called a
+        # "laptop", a switchboard a "chandelier") is not a product to price.
+        return "unpriced"
+    return "range"
 
 
 def _reads_as_words(text: str) -> bool:
@@ -241,10 +253,7 @@ def price_and_assemble(
             words = " ".join(it["text"])
             if len(re.sub(r"[^A-Za-z]", "", words)) >= 3 and len(words.split()) <= 4 and _reads_as_words(words):
                 brand = words  # text printed on the object itself (a logo or a model plate)
-        if it.get("vision_check") == "unknown" and float(it.get("confidence", 0)) < UNSURE_ITEM_CONF:
-            # Neither the vision model nor the detector is sure what it is: pricing the detector's guess (a
-            # pressure cooker called a "cup", an iron a "mouse") would put a wrong product in the claim.
-            status = "unpriced"
+        status = item_price_status(it, s.item_vision_check)
         if it["category"] == "art":
             status = "needs_appraisal"
             ans = _nearest_answer(art_answers, store, it)

@@ -15,13 +15,12 @@
 
 ## The sweep (the brief's scenario)
 
-The agent confirms country and currency and waits for the answer, then explains the walk in two sentences.
-The policyholder walks the room once: along the shelves ("next shelf", "done with books" are optional
-markers), then across walls, floor and items in the same pass, and says "I'm done". The agent says what it
-logs ("Logged Rework"), asks to slow down or step closer, and asks whether art is an original or a print.
-During the walk the language model neither speaks nor records: it invented facts in tests. Corrections
-("skip that shelf", "it's a print", "first edition") are recorded by rule; other questions get fixed, true
-answers. Each frame is tagged with the part of the walk it belongs to (shelves or room, shelf number).
+The agent confirms country and currency, waits for the answer, and explains the walk in two sentences. The
+policyholder walks the room once: along the shelves ("next shelf", "done with books" are optional markers),
+then across walls, floor and items, and says "I'm done". The agent says what it logs ("Logged Rework"), asks
+to slow down or step closer, and asks whether art is an original or a print. During the walk the language
+model neither speaks nor records (it invented facts in tests): corrections ("skip that shelf", "it's a
+print") are recorded by rule. Each frame is tagged with its part of the walk (shelf number or room).
 
 ## Which model does what
 
@@ -37,20 +36,18 @@ answers. Each frame is tagged with the part of the walk it belongs to (shelves o
 
 ## Counting each book once (`pipeline/dedupe.py`)
 
-Spines are tracked frame to frame; then: neighbours that read the same and lie on each other are one spine;
-a second pass over a shelf is aligned in order with the first (sequence alignment); the same catalogue work
-or near-identical reading twice is merged. Guards: different volume numbers or two spines side by side in
-one frame are never merged; a spine whose reading picked up a neighbour's title loses that title instead of
-duplicating it. On a guided shelf, fragments never seen whole or seen once outside the shelf row are not
-counted. Every merge and exclusion is logged with its reason.
+Spines are tracked frame to frame. Neighbours that read the same and overlap are one spine; a second pass over
+a shelf is aligned in order with the first (sequence alignment); the same catalogue work twice is merged.
+Different volume numbers, or two spines side by side in one frame, are never merged. Fragments never seen
+whole are not counted. Every merge and exclusion is logged with its reason.
 
 ## Where metric scale comes from
 
 Catalogue heights (Google Books dimensions, Open Library editions) of identified books are rulers: in each
 frame, a ruler standing in the same shelf row gives that picture's pixels per centimetre for its neighbours
-(height error 2-10% on real sweeps). AR depth is used when the phone's AR tracks reliably (`web/artest.html`
-tests it). Never estimated by a model. The room needs AR depth; without it the room is reported as not
-measured.
+(height error 2-10% on real sweeps). Never estimated by a model. ARCore depth and pose are used when the
+phone's AR tracks reliably (`web/artest.html` checks it). The room needs ARCore; on the test phone ARCore
+itself fails (failure log, item 1), so the room is reported as not measured.
 
 ## Where prices come from
 

@@ -20,3 +20,14 @@ def test_contents_words_are_not_fixtures():
     assert canonical("kitchen sink")[2] is True
     assert canonical("light switch")[2] is True
     assert canonical("not sure") is None and canonical("unknown object") is None
+
+
+def test_a_building_word_in_front_of_a_contents_word_keeps_the_item():
+    assert canonical("door mat") == ("doormat", "rug", False)
+    assert canonical("floor mat") == ("mat", "rug", False)
+    assert canonical("wall mirror") == ("mirror", "decor", False)
+    assert canonical("window curtain") == ("curtain", "decor", False)
+    assert canonical("wall art") == ("wall art", "art", False)  # art goes to appraisal, it is never dropped
+    fixtures = ("light switch", "wall socket", "kitchen sink", "plug point", "floor", "door", "wall", "door handle")
+    for fixture in fixtures:
+        assert canonical(fixture)[2] is True, fixture

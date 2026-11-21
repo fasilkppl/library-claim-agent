@@ -4,7 +4,7 @@ A live voice-and-vision agent that inventories and values a home library from **
 sweep**. The policyholder walks the room with an Android phone while talking to the agent. The agent coaches
 the capture as it happens ("slow down", "step closer", "is that portrait an original or a print?"). When the
 walk ends, the system writes a claim packet: every book read from its spine, measured and priced locally;
-every other item classified and priced; and the room's floor and wall area.
+every other item classified and priced; and, when the phone's AR tracking works, the room's floor and wall area.
 
 Everything runs **locally on a Mac with Apple Silicon**: speech, dialog, vision and OCR. The only network
 calls are catalogue lookups and price retrieval, and every one is saved as evidence.
@@ -13,11 +13,11 @@ calls are catalogue lookups and price retrieval, and every one is saved as evide
 - Failure log (one page): [docs/failure_log.md](docs/failure_log.md)
 - Ground-truth templates: [ground_truth/template/](ground_truth/template/); results come from `make eval`
 
-## Quick start (about 15 minutes, most of it downloads)
+## Quick start (about 15 minutes on a fast connection; most of it is the ~10 GB model download)
 
 Requirements: macOS 14+ on Apple Silicon with 16 GB RAM or more, [uv](https://docs.astral.sh/uv/),
-[Ollama](https://ollama.com/download), Android Platform Tools (`adb`), and an ARCore-capable Android phone
-with Chrome.
+[Ollama](https://ollama.com/download), Android Platform Tools (`adb`), and an Android phone with Chrome
+(ARCore is needed only for the optional AR mode).
 
 ```bash
 cd claim-agent
@@ -38,9 +38,10 @@ server (`make run`) and the USB link (`make phone`) must be running; otherwise t
 
 1. **Connect & talk**. The agent greets you and confirms the country and currency (from the phone's time
    zone; say so if it is wrong).
-2. **Start AR sweep**. Walk the room once: shelves top to bottom at arm's length, then each wall, the floor
-   and the ceiling. Talk normally: "skip that shelf, those aren't mine", "that one is a signed first
-   edition", "it's a print".
+2. **Camera-only sweep** (the default; open `/?ar=1` to get the AR sweep instead). Walk the room once: along
+   each shelf from left to right, about half a metre away (tap **Next shelf** between shelves and **Books
+   done** at the end, or say it), then pan slowly across the walls, the floor and everything in the room.
+   Talk normally: "skip that shelf, those aren't mine", "that one is a signed first edition", "it's a print".
 3. **Finish sweep**, or say "I'm done". The packet appears on screen (report link and `claim_packet.json`)
    and the agent reads out the summary.
 
@@ -134,9 +135,11 @@ assistant.
 
 ## Limitations (honest)
 
-- Room areas need AR depth. Early AR sweeps on the test phone read impossible depths (16-37 m at 1 m); it is
-  not yet proven whether the phone or our depth handling was at fault (`web/artest.html` checks it), so the
-  room is reported as not measured in camera sweeps.
+- Room areas need ARCore. On the test phone (OnePlus 15, Android 17) ARCore itself fails: a standalone
+  ARCore app (AR Ruler), Google's model-viewer demo and our test page (`web/artest.html`) all lose tracking,
+  and ARCore logs camera-to-motion-sensor clock offsets of -54 to +44 ms against its 5 ms limit. Our AR
+  geometry passes the synthetic replay (floor within 10 %, walls within 15 %). Camera sweeps therefore
+  report the room as not measured; evidence in [docs/failure_log.md](docs/failure_log.md).
 - Very thin neighbouring spines can be detected as one (two 1 cm books counted once); spine thickness is
   overestimated where masks bleed into neighbours.
 - Items seen only in passing are named from partial crops and can be misnamed (an iron called a hand

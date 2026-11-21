@@ -67,12 +67,18 @@ def collect_items(
     vlm_budget_s: float = vlm.BUDGET_S,
 ) -> dict[str, Any]:
     guided = guided_items(store)
+    spines = {seq: [sp["bbox"] for sp in d.get("spines", [])] for seq, d in det.items()}
     if guided:
         # A guided sweep: the items shown one by one are the items. Detections elsewhere (a pan in the corner
         # of a shelf frame, the same bucket seen again) are not added, so nothing is counted twice.
         log.info("items: %s confirmed by the guide", len(guided))
         return _finish_items(
-            store, guided, {m.seq: m for m in store.frames()}, observations=len(guided), vlm_budget_s=vlm_budget_s
+            store,
+            guided,
+            {m.seq: m for m in store.frames()},
+            observations=len(guided),
+            vlm_budget_s=vlm_budget_s,
+            spines=spines,
         )
     metas = {m.seq: m for m in selected}
     obs = []
@@ -144,7 +150,7 @@ def collect_items(
                 "boxes": {str(e["seq"]): list(e["bbox"]) for e in c},
             }
         )
-    return _finish_items(store, items, metas, observations=len(obs), vlm_budget_s=vlm_budget_s)
+    return _finish_items(store, items, metas, observations=len(obs), vlm_budget_s=vlm_budget_s, spines=spines)
 
 
 def _finish_items(
@@ -153,6 +159,7 @@ def _finish_items(
     metas: dict[int, FrameMeta],
     observations: int,
     vlm_budget_s: float = vlm.BUDGET_S,
+    spines: dict[int, list[Any]] | None = None,
 ) -> dict[str, Any]:
     """Names each item from its picture (vision model) and removes building fixtures and books."""
     removed: list[dict[str, Any]] = []
@@ -165,7 +172,7 @@ def _finish_items(
             img = cv2.imread(str(store.frame_path(metas[it["frame_seq"]])))
             if img is not None:
                 images[it["frame_seq"]] = img
-        removed = vlm.name_items(items, images, vlm_budget_s)
+        removed = vlm.name_items(items, images, vlm_budget_s, spines=spines)
     merged = _drop_repeats(store, items, metas)
     data = {"items": items, "observations": observations, "removed_fixtures": removed, "merged_repeats": merged}
     store.write_stage("items", data)

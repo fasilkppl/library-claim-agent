@@ -231,6 +231,28 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
     else:
         bar("Spine dimensions", "within 15% on 20 books", "no ground truth", None)
 
+    # The sheet: every book in the ground truth next to what the system reported for it.
+    title_hit = {id(legible[i]): b for i, b in m.items()}
+    res["books"] = []
+    for i, r in enumerate(books_gt):
+        tb, sb = title_hit.get(id(r)), paired.get(i)
+        shown = tb or sb
+        res["books"].append(
+            {
+                "n": r.get("book_no") or str(i + 1),
+                "title": r.get("title", ""),
+                "author": r.get("author", ""),
+                "legible": r.get("legible", ""),
+                "system_title": shown.title if shown else "",
+                "system_status": shown.status if shown else "not found",
+                "title_ok": tb is not None,
+                "true_h": _num(r.get("spine_height_cm")),
+                "sys_h": sb.spine_height_cm if sb else None,
+                "true_t": _num(r.get("spine_thickness_cm")),
+                "sys_t": sb.spine_thickness_cm if sb else None,
+            }
+        )
+
     # Prices
     perr, prow = [], []
     priced_ids: set[str] = set()  # one packet book per truth row
@@ -249,13 +271,19 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
             {
                 "title": r["title"],
                 "true": true_r,
+                "true_source": r.get("replacement_source_type", ""),
+                "true_url": r.get("replacement_url", ""),
+                "checked_on": r.get("checked_on", ""),
                 "system": sys_r,
+                "system_title": hit.title if hit else "",
                 "source": hit.replacement_cost.source if hit else "",
+                "system_url": hit.replacement_cost.url if hit else "",
                 "error": None if e is None else round(e, 3),
             }
         )
     # Books with no reference price (not sold in the country) cannot be graded; the app's blank there is right.
     graded = [r for r in prow if r["true"] is not None]
+    res["prices"] = prow
     if graded:
         ok = sum(e <= 0.25 for e in perr)
         bar(
@@ -270,15 +298,39 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
         bar("Book prices", "within 25% on 15 books", "no ground truth", None)
 
     # Items
+    res["items"], res["system_items"] = (
+        [],
+        [
+            {
+                "category": i.category,
+                "description": i.description,
+                "status": i.status,
+                "low": i.replacement_cost.low,
+                "high": i.replacement_cost.high,
+                "currency": i.replacement_cost.currency,
+                "source": i.replacement_cost.source,
+            }
+            for i in p.items
+        ],
+    )
     if items_gt:
         sys_cats = [i.category for i in p.items]
         found = 0
         for r in items_gt:
             raw = r["category"].strip().lower()
             cat = ITEM_CATEGORY_ALIASES.get(raw) or CATEGORY.get(raw, raw)
-            if cat in sys_cats:
+            hit_item = cat in sys_cats
+            if hit_item:
                 sys_cats.remove(cat)
                 found += 1
+            res["items"].append(
+                {
+                    "n": r.get("item_no", ""),
+                    "category": r["category"],
+                    "description": r.get("description", ""),
+                    "found": hit_item,
+                }
+            )
         rate = found / len(items_gt)
         bar(
             "Non-book items",
@@ -304,6 +356,13 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
             None if true_v is None else (e is not None and e <= tol),
         )
 
+    room_keys = ("length_m", "width_m", "height_m", "floor_area_m2", "wall_area_m2", "shelved_wall_area_m2")
+    res["room"] = {
+        "true": {k: room_gt.get(k) for k in room_keys},
+        "system": {k: getattr(p.room, k) for k in room_keys},
+        "notes": list(p.room.notes),
+    }
+
     t_raw = p.metrics.get("sweep_ended_to_packet_s")
     t = float(t_raw) if isinstance(t_raw, (int, float)) else None
     bar(
@@ -312,20 +371,131 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
         f"{t} s" if t is not None else "unknown",
         None if t is None else t < 300,
     )
+    res["samples"] = {
+        "books": int(true_n) if true_n else len(books_gt),
+        "measured_spines": len(measured),
+        "checked_prices": len(graded),
+        "items": len(items_gt),
+    }
     return res
 
 
+def _cell(v: Any, digits: int = 1) -> str:
+    if v is None or v == "":
+        return "—"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, float):
+        return f"{v:.{digits}f}"
+    return str(v).replace("|", "\\|")
+
+
+def _vs(true_v: float | None, sys_v: float | None) -> str:
+    """'true / system (error)' for one measured value."""
+    e = _pct(sys_v, true_v)
+    return f"{_cell(true_v)} / {_cell(sys_v)}" + (f" ({e:.0%})" if e is not None else "")
+
+
 def render_markdown(res: dict[str, Any]) -> str:
+    """The results sheet: the ground truth next to the system's numbers, and every pass bar."""
+    s = res.get("samples", {})
     lines = [
-        f"# Results vs ground truth — sweep {res['sweep']}",
+        f"# Ground truth and results — sweep {res['sweep']}",
         "",
-        "| Measure | Pass bar | Result | Pass |",
+        f"Test space: {s.get('books', '?')} books, {s.get('measured_spines', '?')} of them hand-measured and "
+        f"{s.get('checked_prices', '?')} with a hand-checked price (the brief asks for 20 and 15; this library has "
+        f"{s.get('books', '?')} books), {s.get('items', '?')} non-book items and one tape-measured room.",
+        "",
+        "## Pass bars",
+        "",
+        "| Measure | Pass bar | System result | Pass |",
         "|---|---|---|---|",
     ]
     for b in res["bars"]:
         mark = {True: "PASS", False: "FAIL", None: "n/a"}[b["pass"]]
-        lines.append(f"| {b['measure']} | {b['pass_bar']} | {b['result']} | {mark} |")
-    for b in res["bars"]:
-        if b["detail"]:
-            lines += ["", f"## {b['measure']} detail", "", "```", str(b["detail"])[:4000], "```"]
+        lines.append(f"| {b['measure']} | {b['pass_bar']} | {_cell(b['result'])} | {mark} |")
+
+    if res.get("books"):
+        lines += [
+            "",
+            "## Books: hand-read and hand-measured vs system",
+            "",
+            "Spine sizes in cm as ground truth / system (error).",
+            "",
+            "| # | Title (hand-read) | Author | Legible | System title | Title correct | Height | Thickness |",
+            "|---|---|---|---|---|---|---|---|",
+        ]
+        for r in res["books"]:
+            sys_title = r["system_title"] or f"({r['system_status']})"
+            lines.append(
+                f"| {_cell(r['n'])} | {_cell(r['title'])} | {_cell(r['author'])} | {_cell(r['legible'])} | "
+                f"{_cell(sys_title)} | {_cell(r['title_ok'])} | {_vs(r['true_h'], r['sys_h'])} | "
+                f"{_vs(r['true_t'], r['sys_t'])} |"
+            )
+    titles = next((b for b in res["bars"] if b["measure"] == "Title identification" and b["detail"]), None)
+    if titles:
+        missed = ", ".join(titles["detail"]["missed"]) or "none"
+        wrong = ", ".join(w["title"] for w in titles["detail"]["confidently_wrong"]) or "none"
+        lines += ["", f"Titles missed: {missed}. Confidently wrong: {wrong}."]
+
+    if res.get("prices"):
+        lines += [
+            "",
+            "## Prices: hand-checked vs system (replacement, new)",
+            "",
+            "| Title | Hand-checked | Checked on | System | System source | Error | Within 25% |",
+            "|---|---|---|---|---|---|---|",
+        ]
+        for r in res["prices"]:
+            true_txt = _cell(r["true"], 0) if r["true"] is not None else "no listing found"
+            if r["true"] is not None and r.get("true_url"):
+                true_txt = f"[{true_txt}]({r['true_url']}) {_cell(r.get('true_source'))}"
+            sys_txt = _cell(r["system"], 0)
+            if r["system"] is not None and r.get("system_url"):
+                sys_txt = f"[{sys_txt}]({r['system_url']})"
+            err = r["error"]
+            within = "—" if r["true"] is None else ("yes" if err is not None and err <= 0.25 else "no")
+            lines.append(
+                f"| {_cell(r['title'])} | {true_txt} | {_cell(r.get('checked_on'))} | {sys_txt} | "
+                f"{_cell(r['source'])} | {'—' if err is None else f'{err:.0%}'} | {within} |"
+            )
+
+    if res.get("items"):
+        lines += [
+            "",
+            "## Non-book items: ground-truth list",
+            "",
+            "| # | Category | Description | Found by system |",
+            "|---|---|---|---|",
+        ]
+        for r in res["items"]:
+            lines.append(
+                f"| {_cell(r['n'])} | {_cell(r['category'])} | {_cell(r['description'])} | {_cell(r['found'])} |"
+            )
+    if res.get("system_items"):
+        lines += [
+            "",
+            "### Items in the packet",
+            "",
+            "| Category | Description | Status | Replacement range |",
+            "|---|---|---|---|",
+        ]
+        for i in res["system_items"]:
+            rng = "—" if i["low"] is None else f"{i['low']:.0f}–{(i['high'] or i['low']):.0f} {i['currency']}"
+            lines.append(f"| {_cell(i['category'])} | {_cell(i['description'])} | {_cell(i['status'])} | {rng} |")
+
+    room = res.get("room")
+    if room:
+        cols = ("length_m", "width_m", "height_m", "floor_area_m2", "wall_area_m2", "shelved_wall_area_m2")
+        lines += [
+            "",
+            "## Room: tape-measured vs system",
+            "",
+            "| | Length m | Width m | Height m | Floor m² | Wall m² | Shelved wall m² |",
+            "|---|---|---|---|---|---|---|",
+            "| Tape-measured | " + " | ".join(_cell(room["true"][k], 2) for k in cols) + " |",
+            "| System | " + " | ".join(_cell(room["system"][k], 2) for k in cols) + " |",
+        ]
+        if room["notes"]:
+            lines += ["", "System notes: " + " ".join(_cell(n) for n in room["notes"])]
     return "\n".join(lines) + "\n"

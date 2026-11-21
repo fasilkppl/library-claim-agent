@@ -155,7 +155,16 @@ def _not_books(reg: Registrar, det: dict[int, dict[str, Any]]) -> dict[int, str]
     frames_in_segment: dict[int, int] = {}
     for link in reg.links.values():
         frames_in_segment[link.segment] = frames_in_segment.get(link.segment, 0) + 1
-    typical = statistics.median(lengths.values()) if lengths else 0.0
+    # The typical length comes from spines seen properly: one-frame slivers at the frame edge would pull it down
+    # and make the tallest book look out of place.
+    seen = [
+        lengths[t.id]
+        for t in reg.tracks
+        if t.orientation == majority
+        and len(t.observations) > NOISE_MAX_OBS
+        and not all(det[o.seq]["spines"][o.index]["touches_edge"] for o in t.observations)
+    ]
+    typical = statistics.median(seen or list(lengths.values())) if lengths else 0.0
     out: dict[int, str] = {}
     for t in reg.tracks:
         odd_shape = t.orientation != majority or lengths[t.id] > ODD_LENGTH * typical
