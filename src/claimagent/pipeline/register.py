@@ -9,6 +9,7 @@ earlier segments so a re-capture of the same shelf merges instead of double coun
 
 from __future__ import annotations
 
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -16,6 +17,21 @@ import cv2
 import numpy as np
 
 WORK_WIDTH = 1280
+Features = tuple[list[cv2.KeyPoint], np.ndarray | None, float]
+_local = threading.local()  # one SIFT detector per thread: frames' features are computed in parallel after the sweep
+
+
+def frame_features(img: np.ndarray) -> Features:
+    """SIFT keypoints and descriptors of a frame at working width, and that width's scale."""
+    sift = getattr(_local, "sift", None)
+    if sift is None:
+        sift = _local.sift = cv2.SIFT_create(nfeatures=2500)
+    scale = min(1.0, WORK_WIDTH / img.shape[1])
+    grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    if scale < 1:
+        grey = cv2.resize(grey, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    kps, desc = sift.detectAndCompute(grey, None)
+    return list(kps), desc, scale
 
 
 @dataclass
@@ -83,26 +99,17 @@ class Registrar:
     """Incremental: call add_frame for every selected frame in time order (used live and offline)."""
 
     def __init__(self, min_inliers: int = 30, lookback: int = 16) -> None:
-        self.sift = cv2.SIFT_create(nfeatures=2500)
         self.matcher = cv2.BFMatcher(cv2.NORM_L2)
         self.min_inliers = min_inliers
         self.lookback = lookback
         self.links: dict[int, FrameLink] = {}
-        self.features: dict[int, tuple[list[cv2.KeyPoint], np.ndarray | None, float]] = {}
+        self.features: dict[int, Features] = {}
         self.order: list[int] = []
         self.tracks: list[Track] = []
         self.segments = 0
         self.segment_parent: dict[int, int] = {}
 
     # ---------------------------------------------------------------- frames
-    def _features(self, img: np.ndarray) -> tuple[list[cv2.KeyPoint], np.ndarray | None, float]:
-        scale = min(1.0, WORK_WIDTH / img.shape[1])
-        grey = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        if scale < 1:
-            grey = cv2.resize(grey, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-        kps, desc = self.sift.detectAndCompute(grey, None)
-        return list(kps), desc, scale
-
     def _homography(self, a: int, b: int) -> tuple[np.ndarray | None, int]:
         """H mapping frame b pixels to frame a pixels (full resolution)."""
         ka, da, sa = self.features[a]
@@ -121,8 +128,14 @@ class Registrar:
             return None, inliers
         return H, inliers
 
-    def add_frame(self, seq: int, img: np.ndarray, spines: list[dict[str, object]]) -> FrameLink:
-        self.features[seq] = self._features(img)
+    def add_frame(
+        self, seq: int, img: np.ndarray | None, spines: list[dict[str, object]], features: Features | None = None
+    ) -> FrameLink:
+        """`features`: computed beforehand (frame_features), then `img` is not needed."""
+        if features is None:
+            assert img is not None
+            features = frame_features(img)
+        self.features[seq] = features
         link: FrameLink | None = None
         if self.order:
             prev = self.order[-1]

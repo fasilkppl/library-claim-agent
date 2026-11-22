@@ -258,6 +258,30 @@ def _close_readings(
     return out
 
 
+READ_WORKERS = 4  # spines read closely in parallel: Apple Vision and the crops run outside the Python lock
+
+
+def _all_close_readings(
+    store: SweepStore,
+    tracks: list[Track],
+    det: dict[int, dict[str, Any]],
+    metas: dict[int, FrameMeta],
+    reader: TextReader,
+) -> dict[int, list[list[dict[str, Any]]]]:
+    """Close readings of every spine, a few spines at a time (one OCR pass is ~50 ms; 120 spines in a row
+    are most of the reading stage)."""
+
+    def one(t: Track) -> list[list[dict[str, Any]]]:
+        try:
+            return _close_readings(store, t, det, metas, reader)
+        except (cv2.error, ValueError, RuntimeError):  # a degenerate crop: this spine keeps its frame readings
+            log.warning("close reading failed for track %s", t.id, exc_info=True)
+            return []
+
+    with ThreadPoolExecutor(max_workers=READ_WORKERS) as pool:
+        return dict(zip([t.id for t in tracks], pool.map(one, tracks), strict=True))
+
+
 def _spine_strip(img: np.ndarray, corners: Any) -> np.ndarray:
     """The spine alone, straightened to a horizontal strip."""
     pts = np.array(corners, np.float32)
@@ -332,11 +356,11 @@ def read_tracks(
             notes.setdefault(ct.id, []).append(ev)
 
     rejected = _not_books(reg, det)
+    kept = [t for t in reg.tracks if t.id not in excluded and t.id not in rejected]
+    close_by_track = _all_close_readings(store, kept, det, metas, reader) if reader is not None else {}
     books = []
     vision_deadline = time.monotonic() + VISION_READ_BUDGET_S
-    for t in reg.tracks:
-        if t.id in excluded or t.id in rejected:
-            continue
+    for t in kept:
         best_text, best_score = "", 0.0
         readings: dict[str, float] = {}
         for o in t.observations:
@@ -349,11 +373,7 @@ def read_tracks(
         obs_lines = [det[o.seq]["spines"][o.index].get("text", []) for o in t.observations]
         widths = [float(det[o.seq]["spines"][o.index]["width"]) for o in t.observations]
         if reader is not None:
-            try:
-                close = _close_readings(store, t, det, metas, reader)
-            except (cv2.error, ValueError, RuntimeError):  # a degenerate crop: this spine keeps its frame readings
-                log.warning("close reading failed for track %s", t.id, exc_info=True)
-                close = []
+            close = close_by_track.get(t.id, [])
             for lines in close:
                 text = " | ".join(ln["text"] for ln in lines)
                 if text:

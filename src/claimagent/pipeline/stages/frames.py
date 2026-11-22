@@ -6,6 +6,7 @@ import bisect
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import cv2
@@ -15,7 +16,7 @@ from claimagent.capture import quality, tracking
 from claimagent.capture.store import FrameMeta, SweepStore
 from claimagent.config import Settings
 from claimagent.pipeline.analyze import FrameAnalyzer
-from claimagent.pipeline.register import Registrar
+from claimagent.pipeline.register import Features, Registrar, frame_features
 
 # ============================================================================ select
 KEYFRAME_SHIFT = 0.12  # keep a frame once the view has moved this share of its width (~88% overlap)
@@ -122,15 +123,23 @@ def _gap(t_ms: int, analysed: list[int]) -> float:
 
 
 # ============================================================================ register
+REGISTER_WORKERS = 4  # frames' features in parallel (OpenCV runs outside the Python lock); chaining stays in order
+
+
 def register_tracks(
     store: SweepStore, selected: list[FrameMeta], det: dict[int, dict[str, Any]]
 ) -> tuple[Registrar, dict[str, Any]]:
-    reg = Registrar()
-    for m in selected:
+    def features(m: FrameMeta) -> Features | None:
         img = cv2.imread(str(store.frame_path(m)))
-        if img is None:
+        return None if img is None else frame_features(img)
+
+    with ThreadPoolExecutor(max_workers=REGISTER_WORKERS) as pool:
+        found = list(pool.map(features, selected))
+    reg = Registrar()
+    for m, f in zip(selected, found, strict=True):
+        if f is None:
             continue
-        reg.add_frame(m.seq, img, det[m.seq]["spines"])
+        reg.add_frame(m.seq, None, det[m.seq]["spines"], features=f)
     summary = reg.summary()
     store.write_stage("register", summary)
     return reg, summary
