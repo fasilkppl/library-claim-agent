@@ -582,12 +582,21 @@ RULER_WORKERS = 6
 THICK_RATIO_MAX = 2.0
 
 
-def fuse_thickness(photo: float | None, catalogue: tuple[float, str]) -> tuple[float, str]:
+# Scale sources that measure the picture itself (a printed marker of known size, AR depth, a shelf width said
+# aloud). With them the photo is a measurement: on a marker-scaled test shelf photo widths were 2-7% off while
+# page counts of other editions were 30-50% off. Catalogue-height rulers come from records that are often another
+# edition, so a photo scaled by them is combined with the page count instead.
+METRIC_SCALES = {"reference-marker", "webxr-depth", "stated-shelf-width"}
+
+
+def fuse_thickness(photo: float | None, catalogue: tuple[float, str], metric_scale: bool = False) -> tuple[float, str]:
     """One thickness from the photo and the page-count estimate (see THICK_RATIO_MAX), with the reason."""
     cat, where = catalogue
     if photo is None or not 1 / THICK_RATIO_MAX <= photo / cat <= THICK_RATIO_MAX:
         measured = "none" if photo is None else f"{photo:.1f} cm"
         return cat, f"thickness from the catalogue ({where}); the photo gave {measured}"
+    if metric_scale:
+        return photo, f"thickness from the photo on a metric scale; catalogue {cat:.1f} cm ({where}) agrees within 2x"
     return (photo * cat) ** 0.5, f"thickness: photo {photo:.1f} cm and catalogue {cat:.1f} cm ({where}) combined"
 
 
@@ -810,7 +819,7 @@ def measure_books(
         cat = thick_cat.get(t.id)
         photo_thick = thick
         if cat is not None:
-            thick, why = fuse_thickness(thick, cat)
+            thick, why = fuse_thickness(thick, cat, source in METRIC_SCALES)
             checks.append(why)
         if b["only_partial"]:
             checks.append("spine only seen cut off at the frame edge; size is a lower bound")

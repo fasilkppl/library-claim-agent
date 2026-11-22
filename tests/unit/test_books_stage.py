@@ -18,6 +18,9 @@ def test_photo_and_page_count_thickness_are_combined_unless_the_outline_is_wrong
     t, why = fuse_thickness(3.12, (0.8, "100 pages"))  # four times the page count: an outline over two spines
     assert t == 0.8 and "photo gave 3.1 cm" in why
     assert fuse_thickness(None, (1.8, "279 pages"))[0] == 1.8
+    # A photo measured against a printed marker stands on its own (test shelf: 3.18 cm measured, 3.25 true, 287
+    # pages of another edition said 1.8).
+    assert fuse_thickness(3.18, (1.8, "287 pages"), metric_scale=True)[0] == 3.18
 
 
 def test_a_match_from_one_frame_needs_the_author_or_most_of_the_reading():
