@@ -1,0 +1,1 @@
+{"url": "https://openlibrary.org/search.json?fields=title%2Cauthor_name&limit=8&title=Das+Handwerk+des+Dichters", "status": 200, "retrieved_at": "2026-11-22T05:11:43+00:00", "data": {"numFound": 0, "start": 0, "numFoundExact": true, "num_found": 0, "documentation_url": "https://openlibrary.org/dev/docs/api/search", "q": "", "offset": null, "docs": []}}
