@@ -96,26 +96,15 @@ def threshold_local(engine: PriceEngine, s: Settings, currency: str) -> float | 
     return s.appraisal_threshold_usd * r[0] if r else None
 
 
-def price_and_assemble(
-    store: SweepStore,
-    s: Settings,
-    engine: PriceEngine,
-    read: dict[str, Any],
-    resolved: dict[str, Any],
-    measured: dict[str, Any],
-    items: dict[str, Any],
-    room_data: dict[str, Any],
-    metrics: dict[str, Any],
-) -> ClaimPacket:
-    session = store.read_session()
-    country = session.get("country", s.country)
-    currency = session.get("currency", s.currency)
+BookPrices = list[tuple[PriceFigure, PriceFigure] | None]
+
+
+def plan_books(
+    s: Settings, read: dict[str, Any], resolved: dict[str, Any], measured: dict[str, Any]
+) -> list[tuple[Any, ...]]:
+    """One line per book: id, reading, catalogue match, measurement, status, confidence, appraisal reason."""
     res = {r["track"]: r for r in resolved["books"]}
     meas = {m["track"]: m for m in measured["books"]}
-    review: list[ReviewEntry] = []
-    limit = threshold_local(engine, s, currency)
-
-    # ------------------------------------------------------------ books
     plan = []
     for n, b in enumerate(read["books"], start=1):
         r, m = res.get(b["track"], {}), meas.get(b["track"], {})
@@ -135,6 +124,11 @@ def price_and_assemble(
         if rare_reason and status == "identified":
             status = "needs_appraisal"
         plan.append((bid, b, r, m, status, conf, rare_reason))
+    return plan
+
+
+def price_books(engine: PriceEngine, plan: list[tuple[Any, ...]], country: str) -> BookPrices:
+    """New and used prices of every identified book (others: None), several lookups at a time."""
 
     def do_price(p: tuple[Any, ...]) -> tuple[PriceFigure, PriceFigure] | None:
         _, _, r, _, status, _, _ = p
@@ -148,7 +142,40 @@ def price_and_assemble(
             return None
 
     with ThreadPoolExecutor(max_workers=PRICE_WORKERS) as pool:
-        prices = list(pool.map(do_price, plan))
+        return list(pool.map(do_price, plan))
+
+
+def book_price_lookups(
+    store: SweepStore, s: Settings, engine: PriceEngine, read: dict[str, Any], resolved: dict[str, Any]
+) -> BookPrices:
+    """The books' price lookups alone, as soon as the titles are final (they need no measurement), so they
+    run while the books are measured and the items named."""
+    country = store.read_session().get("country", s.country)
+    return price_books(engine, plan_books(s, read, resolved, {"books": []}), country)
+
+
+def price_and_assemble(
+    store: SweepStore,
+    s: Settings,
+    engine: PriceEngine,
+    read: dict[str, Any],
+    resolved: dict[str, Any],
+    measured: dict[str, Any],
+    items: dict[str, Any],
+    room_data: dict[str, Any],
+    metrics: dict[str, Any],
+    book_prices: BookPrices | None = None,
+) -> ClaimPacket:
+    """`book_prices`: the books' price lookups when they were started earlier (book_price_lookups)."""
+    session = store.read_session()
+    country = session.get("country", s.country)
+    currency = session.get("currency", s.currency)
+    review: list[ReviewEntry] = []
+    limit = threshold_local(engine, s, currency)
+
+    # ------------------------------------------------------------ books
+    plan = plan_books(s, read, resolved, measured)
+    prices = book_prices if book_prices is not None else price_books(engine, plan, country)
 
     books: list[Book] = []
     for (bid, b, r, m, status, conf, rare_reason), pr in zip(plan, prices, strict=True):

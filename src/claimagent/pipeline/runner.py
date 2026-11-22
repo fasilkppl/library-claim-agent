@@ -1,7 +1,8 @@
 """Runs the post-sweep stages, times each one, and writes the packet, report and metrics.
 
-The items need only the frame analysis, so they are named (local vision model) on a second thread while the
-books are registered, read and looked up (mostly network waits); the room and the prices wait for both."""
+The items need only the frame analysis, so they are named (local vision model) on a side thread while the
+books are registered, read and looked up (mostly network waits). The book prices need only the final titles, so
+they are looked up on a side thread while the books are measured. The room and the packet wait for both."""
 
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import json
 import logging
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any
 
 from claimagent.capture.store import FrameMeta, SweepStore
@@ -17,7 +18,7 @@ from claimagent.config import Settings, get_settings
 from claimagent.contract import ClaimPacket
 from claimagent.pipeline import stages
 from claimagent.pipeline.analyze import FrameAnalyzer
-from claimagent.pipeline.assemble import price_and_assemble
+from claimagent.pipeline.assemble import BookPrices, book_price_lookups, price_and_assemble
 from claimagent.pipeline.dedupe import dedupe_books, duplicate_pairs
 from claimagent.pipeline.http import CachedHttp
 from claimagent.pipeline.price.engine import PriceEngine
@@ -144,18 +145,25 @@ def run_pipeline(
     selected = [m for m in selected if m.seq in det]  # frames left unanalysed (time budget) are not used
     # 60-90 s for naming the items from their pictures: with 25 s the first check timed out and every item kept
     # the detector's guess; with 45 s a live sweep named 11 of 26. Run beside the book stages, not after them.
-    side = ThreadPoolExecutor(max_workers=1, thread_name_prefix="items")
+    side = ThreadPoolExecutor(max_workers=2, thread_name_prefix="side")
     items_job = side.submit(
         step, "items", lambda: stages.collect_items(store, det, selected, _left(t_all, RESERVE_AFTER_ITEMS, 60, 90))
     )
+
+    def start_prices(read: dict[str, Any], resolved: dict[str, Any]) -> Future[BookPrices]:
+        # Book prices need only the final titles: looked up while the books are measured and the items named.
+        return side.submit(step, "price_books", lambda: book_price_lookups(store, s, engine, read, resolved))
+
     try:
-        book_parts = _book_stages(store, s, frames, selected, det, frame_analyzer, resolver, step, t_all)
+        read, resolved, measured, prices_job = _book_stages(
+            store, s, frames, selected, det, frame_analyzer, resolver, step, t_all, start_prices
+        )
         t_wait = time.perf_counter()
         items = items_job.result()
-        timings["items_wait"] = round(time.perf_counter() - t_wait, 2)  # the book stages' lead over the items
+        book_prices = prices_job.result()
+        timings["side_wait"] = round(time.perf_counter() - t_wait, 2)  # waited for items and book prices
     finally:
         side.shutdown(wait=True)
-    read, resolved, measured = book_parts
     room = step("room", lambda: stages.measure_room(store, list(frames.values()), items, tracking))
 
     session = store.read_session()
@@ -168,7 +176,8 @@ def run_pipeline(
         "frame_analysis_per_frame_s": round(analyze_live / max(1, len(det)), 2),
     }
     packet: ClaimPacket = step(
-        "price_assemble", lambda: price_and_assemble(store, s, engine, read, resolved, measured, items, room, metrics)
+        "price_assemble",
+        lambda: price_and_assemble(store, s, engine, read, resolved, measured, items, room, metrics, book_prices),
     )
     timings["total_post_sweep"] = round(time.perf_counter() - t_all, 2)
     serp = http.paid_calls.get("serpapi", 0)
@@ -205,8 +214,10 @@ def _book_stages(
     resolver: Resolver,
     step: Callable[[str, Callable[[], Any]], Any],
     t_all: float,
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Registration, reading, title lookups, dedupe, author check and measurement of the books."""
+    start_prices: Callable[[dict[str, Any], dict[str, Any]], Future[BookPrices]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], Future[BookPrices]]:
+    """Registration, reading, title lookups, dedupe, author check and measurement of the books; the price
+    lookups start (start_prices) as soon as the titles are final."""
     det_books = books_only(det, frames)
     reg, _ = step("register", lambda: stages.register_tracks(store, selected, det_books))
     read = step("read", lambda: stages.read_tracks(store, reg, det_books, selected, frame_analyzer.models.reader))
@@ -234,13 +245,14 @@ def _book_stages(
     resolved = step(
         "verify", lambda: _verify(store, read, resolved, resolver, _left(t_all, RESERVE_AFTER_VERIFY, 5, 15))
     )
+    prices_job = start_prices(read, resolved)
     measured = step(
         "measure",
         lambda: stages.measure_books(
             store, reg, det_books, selected, read, resolved, resolver, s, _left(t_all, RESERVE_AFTER_RULERS, 5, 20)
         ),
     )
-    return read, resolved, measured
+    return read, resolved, measured, prices_job
 
 
 def write_packet(store: SweepStore, packet: ClaimPacket) -> None:
