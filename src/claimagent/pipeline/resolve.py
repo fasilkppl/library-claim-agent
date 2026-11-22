@@ -8,10 +8,12 @@ accepted when the spine text explains it; otherwise the book stays unidentified.
 from __future__ import annotations
 
 import logging
+import math
 import re
 import statistics
 import time
 import unicodedata
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -137,6 +139,14 @@ GLUE_WORDS = {"of", "the", "and", "to", "in", "on", "for", "with", "a", "an", "d
 
 MAX_VARIANTS = 12
 FALLBACK_SLOTS = 3
+# Open Library asks for batches through search.json rather than many single requests, at 1 request a second:
+# the queries of one round go out as one OR of parenthesised clauses (a clause matches when all its words do).
+OL_BATCH = 16  # clauses per request (16 and 8 named the same books on the test pan and sweep 185148)
+OL_PER_CLAUSE = 8  # candidates kept per clause: what a single query returns
+OL_BATCH_LIMIT = 200  # records asked for per batched request
+OL_SEARCH = "https://openlibrary.org/search.json"
+CLAUSE_MATCH = 0.6  # share of a clause's words a record must carry to count as found by that clause
+GOOGLE_WORKERS = 3  # Google Books requests in flight (its pacing still applies)
 
 
 # Books about a book: their record repeats the book's title ("And the Mountains Echoed by Khaled Hosseini",
@@ -406,11 +416,48 @@ def _score(spine_text: str, cand: Candidate) -> tuple[float, dict[str, Any]]:
     }
 
 
+def _ol_candidate(d: dict[str, Any]) -> Candidate:
+    """A candidate from one Open Library search record."""
+    return Candidate(
+        title=without_author_prefix(d.get("title", ""), d.get("author_name", [])[:3]),
+        authors=d.get("author_name", [])[:3],
+        publisher=", ".join(d.get("publisher", [])[:5]),
+        year=d.get("first_publish_year"),
+        source="Open Library",
+        url=f"https://openlibrary.org{d.get('key', '')}",
+        raw=d,
+    )
+
+
+def clause_matches(query: str, cand: Candidate) -> bool:
+    """Whether a record in a batched answer is one the clause `query` found: it carries most of the clause's
+    words in its title, subtitle, authors or publishers (a word ending in * by its start)."""
+    words = query.split()
+    have = content_tokens(" ".join([cand.title, str(cand.raw.get("subtitle") or ""), *cand.authors, cand.publisher]))
+    hits = sum(any(h.startswith(w[:-1]) for h in have) if w.endswith("*") else _hit(w, have) for w in words)
+    return hits >= math.ceil(CLAUSE_MATCH * len(words))
+
+
+@dataclass
+class _Lookup:
+    """One spine text's lookups across rounds."""
+
+    variants: list[str]
+    cands: list[Candidate] = field(default_factory=list)
+    queries: list[str] = field(default_factory=list)
+    pool_seen: int = 0  # pool candidates already compared with this text
+    pool_best: float = 0.0
+    from_pool: list[Candidate] = field(default_factory=list)
+
+
 class Resolver:
     def __init__(self, http: CachedHttp, google_key: str = "") -> None:
         self.http = http
         self.google_key = google_key
         self.deadline: float | None = None  # time.monotonic() after which no new catalogue query starts
+        # Every candidate found in this sweep: a spine that one of them already explains needs no lookup of its own
+        # (the same book seen again on a second pass, a single-frame reading of a spine already named).
+        self.pool: list[Candidate] = []
 
     def query_text(self, spine_text: str) -> str:
         toks = content_tokens(spine_text)
@@ -475,27 +522,8 @@ class Resolver:
         try:
             if not openlibrary:
                 raise LookupError("open library skipped")
-            r = self.http.get(
-                "https://openlibrary.org/search.json",
-                {
-                    "q": q,
-                    "limit": 8,
-                    "fields": OL_FIELDS,
-                },
-                source="openlibrary",
-            )
-            for d in (r.data or {}).get("docs", [])[:8]:
-                out.append(
-                    Candidate(
-                        title=without_author_prefix(d.get("title", ""), d.get("author_name", [])[:3]),
-                        authors=d.get("author_name", [])[:3],
-                        publisher=", ".join(d.get("publisher", [])[:5]),
-                        year=d.get("first_publish_year"),
-                        source="Open Library",
-                        url=f"https://openlibrary.org{d.get('key', '')}",
-                        raw=d,
-                    )
-                )
+            r = self.http.get(OL_SEARCH, {"q": q, "limit": OL_PER_CLAUSE, "fields": OL_FIELDS}, source="openlibrary")
+            out += [_ol_candidate(d) for d in (r.data or {}).get("docs", [])[:OL_PER_CLAUSE]]
         except (RuntimeError, LookupError):
             pass
         if not google:
@@ -550,6 +578,96 @@ class Resolver:
             cands += [c for c in found if not derivative(c)]
             if cands and max(score(spine_text, c)[0] for c in cands) >= accept:
                 break
+        return self.decide(spine_text, cands, queries, accept)
+
+    def openlibrary_batch(self, queries: list[str]) -> dict[str, list[Candidate]]:
+        """Open Library candidates for several queries from one request (one query: the single-query request)."""
+        if len(queries) == 1:
+            return {queries[0]: self.candidates(queries[0], queries[0], google=False)}
+        params = {
+            "q": " OR ".join(f"({q})" for q in queries),
+            "limit": min(OL_BATCH_LIMIT, (OL_PER_CLAUSE + 2) * len(queries)),
+            "fields": OL_FIELDS,
+        }
+        try:
+            r = self.http.get(OL_SEARCH, params, source="openlibrary")
+        except (RuntimeError, LookupError):
+            return {q: [] for q in queries}
+        found = [_ol_candidate(d) for d in (r.data or {}).get("docs", [])]
+        return {q: [c for c in found if clause_matches(q, c)][:OL_PER_CLAUSE] for q in queries}
+
+    def _late(self) -> bool:
+        return self.deadline is not None and time.monotonic() > self.deadline
+
+    def _google(self, spine_text: str, query: str) -> list[Candidate]:
+        return [] if self._late() else self.candidates(spine_text, query, google=True, openlibrary=False)
+
+    def _pool_explains(self, text: str, st: _Lookup, words: set[str], accept: float, pool_accept: float) -> bool:
+        """Compares the pool's new candidates with the text; True when one explains it at `pool_accept`."""
+        for c in self.pool[st.pool_seen :]:
+            names = set(content_tokens(c.title)) | {w for a in c.authors for w in content_tokens(a)}
+            if not names & words:
+                continue  # a record sharing no word with the spine cannot explain it
+            sc = score(text, c)[0]
+            st.pool_best = max(st.pool_best, sc)
+            if sc >= accept:
+                st.from_pool.append(c)
+        st.pool_seen = len(self.pool)
+        return st.pool_best >= pool_accept
+
+    def resolve_many(
+        self, texts: list[str], accept: float, pool_accept: float, google_queries: int = GOOGLE_QUERIES_PER_TEXT
+    ) -> dict[str, Resolution]:
+        """Many spine texts in rounds: round k sends the k-th query of every text still open, Open Library's
+        batched into few requests and Google Books' one per text. A text stops at a candidate scoring `accept`
+        (as in resolve) or when a candidate in the sweep's pool explains it at `pool_accept`. No round starts
+        after the deadline; every text is decided on the candidates found by then."""
+        state = {t: _Lookup(self.query_variants(t)) for t in texts}
+        words = {t: set(content_tokens(t)) for t in texts}
+        # More readable words first: those texts are likelier to be named, so they get the early requests.
+        order = sorted(texts, key=lambda t: (-len(words[t]), t))
+        open_ = set(texts)
+        google = ThreadPoolExecutor(max_workers=GOOGLE_WORKERS, thread_name_prefix="google")
+        try:
+            k = 0
+            while open_ and not self._late():
+                for t in order:
+                    if t in open_ and self._pool_explains(t, state[t], words[t], accept, pool_accept):
+                        open_.discard(t)
+                todo = [t for t in order if t in open_ and k < len(state[t].variants)]
+                if not todo:
+                    break
+                query = {t: state[t].variants[k] for t in todo}
+                jobs = {t: google.submit(self._google, t, query[t]) for t in todo if k < google_queries}
+                ol: dict[str, list[Candidate]] = {}
+                batch = list(dict.fromkeys(query[t] for t in todo))
+                for i in range(0, len(batch), OL_BATCH):
+                    if not self._late():
+                        ol.update(self.openlibrary_batch(batch[i : i + OL_BATCH]))
+                found_now: list[Candidate] = []
+                for t in todo:
+                    found = ol.get(query[t], []) + (jobs[t].result() if t in jobs else [])
+                    st = state[t]
+                    st.queries.append(query[t])
+                    st.cands += [c for c in found if not derivative(c)]
+                    found_now += [c for c in found if not derivative(c)]
+                    if st.cands and max(score(t, c)[0] for c in st.cands) >= accept:
+                        open_.discard(t)
+                self.pool += found_now
+                k += 1
+        finally:
+            google.shutdown(wait=False, cancel_futures=True)
+        out = {}
+        for t in texts:
+            st = state[t]
+            res = self.decide(t, st.cands + st.from_pool, st.queries, accept)
+            if st.pool_best >= pool_accept:
+                res.evidence["matched_through"] = "a catalogue record found for another spine of this sweep"
+            out[t] = res
+        return out
+
+    def decide(self, spine_text: str, cands: list[Candidate], queries: list[str], accept: float) -> Resolution:
+        """The spine's best candidate among those found: ties, rivals, title and edition."""
         # Ties (the same work in several languages) go to the title closest to the printed words,
         # articles included: "Der Orientalist" on the spine is the German edition, not "The Orientalist".
         # Then, the fuller title wins: "Collected Essays of Elia" over a record titled "Collected Essays".

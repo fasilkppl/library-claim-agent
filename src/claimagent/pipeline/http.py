@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import httpx
 
@@ -23,8 +23,9 @@ from claimagent.capture.store import utc_now
 
 log = logging.getLogger(__name__)
 SECRET_PARAMS = {"api_key", "key", "client_secret", "access_token"}
-# Requests per second a source allows (Google Books: 100 queries per minute per user).
-RATE_LIMITS = {"googlebooks": 1.5}
+# Requests per second a source allows: Google Books 100 queries per minute per user; Open Library 1 request a
+# second for clients that do not identify themselves with a contact address (openlibrary.org/developers/api).
+RATE_LIMITS = {"googlebooks": 1.5, "openlibrary": 1.0}
 PER_MINUTE_WAIT_S = 20.0  # a per-minute quota hit: wait for the window, do not give up on the source
 # Catalogue lookups are many and optional: a slow site must not hold the packet (due 5 min after the sweep).
 FAST_SOURCES = {"openlibrary": (8.0, 2), "googlebooks": (8.0, 2)}  # timeout s, attempts
@@ -43,6 +44,11 @@ class Response:
 
 
 class CachedHttp:
+    # Pacing is shared by every client in the process: the live sweep's lookups and the packet's must not add up
+    # to more than a source allows.
+    _next_slot: ClassVar[dict[str, float]] = {}
+    _rate_lock: ClassVar[threading.Lock] = threading.Lock()
+
     def __init__(self, cache_dir: Path, offline: bool = False, timeout: float = 20.0) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -52,8 +58,6 @@ class CachedHttp:
         self.cache_hits = 0
         self.paid_calls: dict[str, int] = {}
         self.disabled: dict[str, str] = {}  # source -> reason (quota exhausted, auth failed)
-        self._next_slot: dict[str, float] = {}
-        self._rate_lock = threading.Lock()
         self._count_lock = threading.Lock()
         self._timeouts_in_a_row: dict[str, int] = {}
 

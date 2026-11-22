@@ -241,3 +241,90 @@ def test_a_record_far_from_the_works_median_page_count_is_an_unusual_edition():
     t, why = Resolver(_Http()).catalogue_thickness_cm("V", title="A Tale of Two Cities", author="Charles Dickens")
     assert t == 2.4 and "unusual edition" in why
     assert without_author_prefix("A Tale of Two Cities -", ["Charles Dickens"]) == "A Tale of Two Cities"
+
+
+class _Resp:
+    def __init__(self, data):
+        self.data, self.status = data, 200
+
+
+def _ol_doc(key, title, author):
+    return {"key": key, "title": title, "author_name": [author]}
+
+
+def test_open_library_queries_go_out_batched_and_each_keeps_what_it_found():
+    from claimagent.pipeline.resolve import OL_SEARCH, Resolver
+
+    sent = []
+
+    class _Http:
+        def get(self, url, params, source=""):
+            sent.append((url, dict(params), source))
+            return _Resp(
+                {
+                    "docs": [
+                        _ol_doc("/works/OL1W", "Wings of Fire", "A. P. J. Abdul Kalam"),
+                        _ol_doc("/works/OL2W", "Rework", "Jason Fried"),
+                        _ol_doc("/works/OL3W", "Garden Design", "Somebody Else"),
+                    ]
+                }
+            )
+
+    got = Resolver(_Http()).openlibrary_batch(["wings fire kalam", "rework fried", "garden* histor*"])
+    assert len(sent) == 1 and sent[0][0] == OL_SEARCH and sent[0][2] == "openlibrary"
+    assert sent[0][1]["q"] == "(wings fire kalam) OR (rework fried) OR (garden* histor*)"
+    assert [c.title for c in got["wings fire kalam"]] == ["Wings of Fire"]
+    assert [c.title for c in got["rework fried"]] == ["Rework"]
+    assert got["garden* histor*"] == []  # "garden*" matches, "histor*" does not: half is not enough
+
+
+def test_one_open_library_query_is_the_single_query_request():
+    from claimagent.pipeline.resolve import OL_PER_CLAUSE, Resolver
+
+    sent = []
+
+    class _Http:
+        def get(self, url, params, source=""):
+            sent.append(dict(params))
+            return _Resp({"docs": [_ol_doc("/works/OL2W", "Rework", "Jason Fried")]})
+
+    got = Resolver(_Http()).openlibrary_batch(["rework fried"])
+    assert sent[0]["q"] == "rework fried" and sent[0]["limit"] == OL_PER_CLAUSE  # same request, same cached answer
+    assert [c.title for c in got["rework fried"]] == ["Rework"]
+
+
+def test_a_book_seen_again_is_named_from_the_pool_without_its_own_lookup():
+    from claimagent.pipeline.resolve import Resolver
+
+    searched = []
+
+    class _Http:
+        def get(self, url, params, source=""):
+            searched.append(params["q"])
+            if "googleapis" in url:
+                return _Resp({"items": []})
+            return _Resp({"docs": [_ol_doc("/works/OL2W", "Rework", "Jason Fried")]})
+
+    r = Resolver(_Http())
+    first = r.resolve_many(["REWORK | JASON FRIED"], 0.65, 0.85)["REWORK | JASON FRIED"]
+    assert first.status == "identified" and first.title == "Rework"
+    before = len(searched)
+    again = r.resolve_many(["JASON FRIED | REWORK"], 0.65, 0.85)
+    assert len(searched) == before  # no request: the record found for the first spine explains this one
+    assert again["JASON FRIED | REWORK"].title == "Rework"
+    assert "another spine" in again["JASON FRIED | REWORK"].evidence["matched_through"]
+
+
+def test_after_the_deadline_no_round_starts_and_each_text_keeps_what_it_found():
+    import time
+
+    from claimagent.pipeline.resolve import Resolver
+
+    class _Http:
+        def get(self, url, params, source=""):
+            raise AssertionError("no request after the deadline")
+
+    r = Resolver(_Http())
+    r.deadline = time.monotonic() - 1
+    out = r.resolve_many(["SOME | SPINE TEXT"], 0.65, 0.85)
+    assert out["SOME | SPINE TEXT"].status == "unidentified"

@@ -6,7 +6,7 @@ import logging
 import re
 import statistics
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -22,7 +22,7 @@ from claimagent.pipeline.analyze import CROP_MIN_LENGTH_PX, read_spine_crop
 from claimagent.pipeline.dedupe import same_word
 from claimagent.pipeline.dedupe import tokens as dd_tokens
 from claimagent.pipeline.register import Registrar, Track
-from claimagent.pipeline.resolve import Resolver
+from claimagent.pipeline.resolve import GOOGLE_QUERIES_PER_TEXT, Resolver
 from claimagent.pipeline.stages.common import MARKER_SIDE_CM_DEFAULT, camera_of
 from claimagent.pipeline.vision import TextReader
 
@@ -454,29 +454,22 @@ def resolve_books(
 
     resolver.deadline = time.monotonic() + min(RESOLVE_BUDGET_S, budget_s)
 
-    def resolve_all(texts: list[str]) -> dict[str, Any]:
-        # Hard stop at the budget: lookups still waiting are abandoned (their spines stay unidentified).
-        pool = ThreadPoolExecutor(max_workers=6)
-        futures = {pool.submit(resolver.resolve, t, s.id_review): t for t in texts}
-        remaining = max(0.0, (resolver.deadline or time.monotonic()) - time.monotonic()) + HARD_STOP_GRACE_S
-        done, _ = wait(futures, timeout=remaining)
-        pool.shutdown(wait=False, cancel_futures=True)
-        out: dict[str, Any] = {}
-        for f in done:
-            try:
-                out[futures[f]] = f.result()
-            except Exception:  # a lookup that failed is a spine left unidentified, not a failed packet
-                log.exception("resolve failed for %r", futures[f])
-        return out
+    def resolve_all(texts: list[str], google_queries: int) -> dict[str, Any]:
+        # In rounds, batched (resolve_many); at the budget no new round starts and each text keeps what it found.
+        try:
+            return dict(resolver.resolve_many(sorted(texts), s.id_review, s.id_accept, google_queries))
+        except Exception:  # lookups that failed leave spines unidentified, not a failed packet
+            log.exception("title lookups failed")
+            return {}
 
     # Consensus first; single-frame readings only for spines it did not identify confidently.
-    results = resolve_all(sorted({consensus(b) for b in read["books"] if consensus(b)}))
+    results = resolve_all(sorted({consensus(b) for b in read["books"] if consensus(b)}), GOOGLE_QUERIES_PER_TEXT)
     pending = [
         b for b in read["books"] if consensus(b) not in results or results[consensus(b)].confidence < s.id_accept
     ]
     if resolver.deadline is not None and time.monotonic() > resolver.deadline:
         log.info("resolve budget spent on consensus readings; %s spines get no single-frame lookup", len(pending))
-    results.update(resolve_all(sorted({v for b in pending for v in singles(b)} - set(results))))
+    results.update(resolve_all(sorted({v for b in pending for v in singles(b)} - set(results)), SINGLE_GOOGLE_QUERIES))
     by_consensus = {
         b["track"]: results[consensus(b)]
         for b in read["books"]
@@ -591,8 +584,10 @@ def second_look(
 
 
 SINGLE_READINGS = 3
+# Google Books queries per single-frame reading: its later queries changed no outcome on the test pan (45 books)
+# or sweep 185148 and were half of all Google requests (quota: 100 a minute, 1000 a day).
+SINGLE_GOOGLE_QUERIES = 1
 RESOLVE_BUDGET_S = 100.0  # the packet is due within 5 minutes of the sweep
-HARD_STOP_GRACE_S = 10.0
 RULER_BUDGET_S = 30.0
 RULER_WORKERS = 6
 # Photo and page-count thickness err in opposite directions: the photo outline takes in a strip of cover or a

@@ -44,6 +44,9 @@ def test_a_match_from_one_frame_needs_the_author_or_most_of_the_reading():
         def resolve(self, text, threshold):
             return answers.get(text, Resolution("unidentified", 0.0, text))
 
+        def resolve_many(self, texts, threshold, pool_threshold, google_queries=6):
+            return {t: self.resolve(t, threshold) for t in texts}
+
     class FakeStore:
         def write_stage(self, name, data):
             return None
