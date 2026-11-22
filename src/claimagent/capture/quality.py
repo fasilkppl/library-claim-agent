@@ -17,9 +17,6 @@ class FrameQuality:
     def is_blurry(self, blur_min: float) -> bool:
         return self.sharpness < blur_min
 
-    def has_glare(self, glare_max: float) -> bool:
-        return self.glare > glare_max
-
     def is_dark(self) -> bool:
         return self.brightness < 45
 

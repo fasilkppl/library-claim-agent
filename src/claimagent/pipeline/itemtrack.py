@@ -18,6 +18,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from claimagent.pipeline.boxes import box_iou
+
 WORK_WIDTH = 480  # images are matched at this width
 MIN_INLIERS = 25
 MATCH_IOU = 0.25
@@ -76,14 +78,6 @@ class _Track:
     kind: str
     box: np.ndarray  # x0, y0, x1, y1 in the current frame's work coordinates
     misses: int = 0
-
-
-def iou(a: np.ndarray, b: np.ndarray) -> float:
-    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
-    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-    inter = ix * iy
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return float(inter / union) if union > 0 else 0.0
 
 
 def inside_fraction(a: Sequence[float], b: Sequence[float]) -> float:
@@ -164,7 +158,7 @@ def link(frames: Sequence[tuple[int, np.ndarray]], sightings: Sequence[Sighting]
         # Same kind: a loose overlap is enough. Different label: only a strong overlap, the same spot.
         pairs = sorted(
             (
-                (iou(t.box, b), t.kind == kind(s.label), ti, ci)
+                (box_iou(t.box, b), t.kind == kind(s.label), ti, ci)
                 for ti, t in enumerate(active)
                 for ci, (s, b) in enumerate(cands)
             ),

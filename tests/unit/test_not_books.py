@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from claimagent.pipeline.register import Observation, Track
-from claimagent.pipeline.stages.books import _not_books
+from claimagent.pipeline.stages.read import _not_books
 
 
 def _shelf(tall_px: float) -> tuple[SimpleNamespace, dict[int, dict]]:

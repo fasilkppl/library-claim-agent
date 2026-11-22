@@ -34,19 +34,6 @@ def new_sweep_id() -> str:
 
 
 @dataclass
-class Intrinsics:
-    fx: float
-    fy: float
-    cx: float
-    cy: float
-    width: int
-    height: int
-
-    def to_dict(self) -> dict[str, float]:
-        return {"fx": self.fx, "fy": self.fy, "cx": self.cx, "cy": self.cy, "width": self.width, "height": self.height}
-
-
-@dataclass
 class FrameMeta:
     seq: int
     t_ms: int
@@ -189,9 +176,6 @@ class SweepStore:
 
     def read_stage(self, name: str) -> Any:
         return json.loads((self.stages_dir / f"{name}.json").read_text())
-
-    def has_stage(self, name: str) -> bool:
-        return (self.stages_dir / f"{name}.json").exists()
 
 
 def _json_default(value: Any) -> Any:

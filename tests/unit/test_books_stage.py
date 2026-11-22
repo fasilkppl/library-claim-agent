@@ -1,4 +1,4 @@
-from claimagent.pipeline.stages.books import holds_spine
+from claimagent.pipeline.stages.lookup import holds_spine
 
 
 def test_a_frame_that_also_read_a_neighbours_whole_spine():
@@ -11,7 +11,7 @@ def test_a_frame_that_also_read_a_neighbours_whole_spine():
 
 
 def test_photo_and_page_count_thickness_are_combined_unless_the_outline_is_wrong():
-    from claimagent.pipeline.stages.books import fuse_thickness
+    from claimagent.pipeline.stages.measure import fuse_thickness
 
     t, why = fuse_thickness(1.87, (1.2, "173 pages"))  # photo too wide, page count too thin: 1.5 on the shelf
     assert round(t, 2) == 1.5 and "combined" in why
@@ -26,7 +26,7 @@ def test_photo_and_page_count_thickness_are_combined_unless_the_outline_is_wrong
 def test_a_match_from_one_frame_needs_the_author_or_most_of_the_reading():
     from claimagent.config import Settings
     from claimagent.pipeline.resolve import Resolution
-    from claimagent.pipeline.stages.books import resolve_books
+    from claimagent.pipeline.stages.lookup import resolve_books
 
     def res(title, conf, author_hit, spine_cov):
         parts = {"title_cov": 1.0, "author_hit": author_hit, "spine_cov": spine_cov, "unexplained": []}

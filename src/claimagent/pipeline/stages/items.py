@@ -13,6 +13,7 @@ from claimagent.capture.store import FrameMeta, SweepStore
 from claimagent.config import get_settings
 from claimagent.pipeline import geometry as geo
 from claimagent.pipeline import itemtrack, vlm
+from claimagent.pipeline.boxes import box_iou
 from claimagent.pipeline.household import CATEGORY
 from claimagent.pipeline.stages.common import camera_of
 
@@ -275,7 +276,7 @@ def _drop_repeats(store: SweepStore, items: list[dict[str, Any]], metas: dict[in
                 apart = [
                     seq
                     for seq in together
-                    if _box_iou(it["boxes"].get(str(seq), []), k["boxes"].get(str(seq), [])) < SEPARATE_IOU
+                    if box_iou(it["boxes"].get(str(seq), []), k["boxes"].get(str(seq), [])) < SEPARATE_IOU
                 ]
                 ha, hb = hists[k["id"]], hists[it["id"]]
                 looks_same = (
@@ -311,13 +312,3 @@ def _drop_repeats(store: SweepStore, items: list[dict[str, Any]], metas: dict[in
     keep_ids = {k["id"] for k in kept}
     items[:] = [it for it in items if it["id"] in keep_ids]
     return merged
-
-
-def _box_iou(a: list[float], b: list[float]) -> float:
-    if len(a) != 4 or len(b) != 4:
-        return 0.0
-    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
-    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-    inter = ix * iy
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / union if union > 0 else 0.0

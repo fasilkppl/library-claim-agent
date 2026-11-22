@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from claimagent.config import get_settings
+from claimagent.pipeline.boxes import box_iou
 from claimagent.pipeline.household import COCO_ITEMS, ITEM_VOCAB
 
 
@@ -59,11 +60,7 @@ class Box:
 
 
 def iou(a: Box, b: Box) -> float:
-    ix = max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0))
-    iy = max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
-    inter = ix * iy
-    union = a.area + b.area - inter
-    return inter / union if union > 0 else 0.0
+    return box_iou((a.x0, a.y0, a.x1, a.y1), (b.x0, b.y0, b.x1, b.y1))
 
 
 def overlap_1d(a0: float, a1: float, b0: float, b1: float) -> float:

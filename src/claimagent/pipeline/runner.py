@@ -49,14 +49,16 @@ def build_engine(http: CachedHttp, s: Settings) -> PriceEngine:
     )
 
 
-# Target: the packet about 3.5 minutes after the sweep (the brief allows 5). Measured on real sweeps: registration
-# 25-38 s, reading 12 s, items 15-37 s, prices 12-35 s, report 5 s; the rest goes to frame analysis and lookups.
+# Target: the packet about 3.5 minutes after the sweep (the brief allows 5). Each slow stage gets what is left of
+# PACKET_BUDGET_S after the reserve for the stages behind it. The reserves were measured when every stage ran in
+# turn (registration 25-38 s, reading 12 s, items 15-37 s, prices 12-35 s, report 5 s); items and book prices now
+# run beside the book stages, so they are generous.
 PACKET_BUDGET_S = 200.0
-RESERVE_AFTER_ANALYZE = 145.0  # registration, reading, title lookups, rulers, items, prices and the report
-RESERVE_AFTER_RESOLVE = 80.0  # rulers, items, prices and the report after the title lookups
-RESERVE_AFTER_VERIFY = 70.0  # rulers, items, prices and the report after the author check
-RESERVE_AFTER_RULERS = 65.0
-RESERVE_AFTER_ITEMS = 40.0
+RESERVE_AFTER_ANALYZE = 145.0  # registration, reading, title lookups, rulers, prices and the report
+RESERVE_AFTER_RESOLVE = 80.0  # second look, author check, rulers, prices and the report
+RESERVE_AFTER_VERIFY = 70.0  # rulers, prices and the report
+RESERVE_AFTER_RULERS = 65.0  # room, prices and the report
+RESERVE_AFTER_ITEMS = 40.0  # items start after the analysis: room and report after them
 
 
 def _left(t0: float, reserve: float, floor: float, cap: float) -> float:

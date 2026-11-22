@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
+from claimagent.pipeline.boxes import box_iou
+
 WORK_WIDTH = 1280
 Features = tuple[list[cv2.KeyPoint], np.ndarray | None, float]
 _local = threading.local()  # one SIFT detector per thread: frames' features are computed in parallel after the sweep
@@ -74,14 +76,6 @@ class Track:
         return max(sorted(votes), key=lambda v: votes[v])  # a tie goes the same way on every run
 
 
-def _box_iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
-    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
-    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
-    inter = ix * iy
-    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / ua if ua > 0 else 0.0
-
-
 def _same_spine(a: tuple[float, float, float, float], b: tuple[float, float, float, float], upright: bool) -> float:
     """Similarity in [0, 1]: overlap across the stacking axis matters most for thin spines."""
     if upright:
@@ -92,7 +86,7 @@ def _same_spine(a: tuple[float, float, float, float], b: tuple[float, float, flo
         other = max(0.0, min(a[2], b[2]) - max(a[0], b[0])) / max(1.0, min(a[2] - a[0], b[2] - b[0]))
     if along < 0.5 or other < 0.4:
         return 0.0
-    return 0.6 * along + 0.4 * _box_iou(a, b)
+    return 0.6 * along + 0.4 * box_iou(a, b)
 
 
 class Registrar:

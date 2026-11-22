@@ -5,7 +5,6 @@ select -> tracking -> analyze -> register -> read -> resolve -> second_look -> m
 """
 
 from claimagent.pipeline.household import CATEGORY
-from claimagent.pipeline.stages.books import consensus_text, measure_books, read_tracks, resolve_books, second_look
 from claimagent.pipeline.stages.frames import (
     analyze_frames,
     check_tracking,
@@ -14,6 +13,9 @@ from claimagent.pipeline.stages.frames import (
     select_frames,
 )
 from claimagent.pipeline.stages.items import collect_items
+from claimagent.pipeline.stages.lookup import resolve_books, second_look
+from claimagent.pipeline.stages.measure import measure_books
+from claimagent.pipeline.stages.read import consensus_text, read_tracks
 from claimagent.pipeline.stages.room import measure_room
 
 __all__ = [
