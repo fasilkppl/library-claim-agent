@@ -133,3 +133,12 @@ def test_post_sweep_analysis_fills_the_biggest_gaps_first_within_budget():
 
     assert _gap(5000, []) == float("inf")
     assert _gap(5000, [1000, 4000, 9000]) == 1000.0
+
+
+def test_a_camera_sweep_on_an_ar_phone_switches_to_ar_for_the_room():
+    g = Guide(ar_room=True)
+    said, over = g.act("books_done")
+    assert not over and "Measure room" in said
+    ui = g.ui()
+    assert ui["step"] == "room" and [a["id"] for a in ui["actions"]] == ["ar_room"]
+    assert Guide().act("books_done")[0].startswith("Got the shelves. Now pan")  # no AR: no button, no mention

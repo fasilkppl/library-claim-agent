@@ -284,6 +284,7 @@ class LiveSession:
             country=cc,
             currency=cur,
             marker_side_cm=float(marker) if marker else None,
+            ar_room=bool(msg.get("ar_room")),
             client_locale=msg.get("locale"),
             client_timezone=msg.get("timezone"),
         )
@@ -308,9 +309,11 @@ class LiveSession:
         self.awaiting_locale = False
         self.store.update_session(state="sweeping", started_monotonic=time.monotonic(), started_at=utc_now())
         self.coach.reset()
-        ar = self.store.read_session().get("capture_mode") == "webxr"
+        session = self.store.read_session()
+        ar = session.get("capture_mode") == "webxr"
         with self.guide_lock:
-            self.guide = Guide()
+            # A camera sweep on a phone with AR switches to AR for the room step (metric depth for the room).
+            self.guide = Guide(ar_room=not ar and bool(session.get("ar_room")))
         self.store.log_event("guide_step", self.elapsed_ms(), action="start", **self.guide.tags())
         await self.send({"type": "state", "state": "sweeping"})
         await self.send(self.guide.ui())
@@ -638,6 +641,7 @@ class LiveSession:
             extra={
                 "client_t": header.get("t"),
                 "emulated": bool(header.get("emulated")),
+                "ar_segment": int(header.get("ar_segment") or 0),
                 "turns": self.turns,
                 **self.guide.tags(),
             },

@@ -10,8 +10,13 @@ A frame is rejected when
 - the camera moved faster than a person walks during a sweep,
 - the phone is higher above the floor than a hand can hold it, or
 - the depth grid is beyond indoor range.
-Once tracking has failed in a sustained way, ARCore does not repair the scale, so every later frame is
-rejected as well. A single bad frame on its own is dropped and tracking continues.
+Once tracking has failed in a sustained way, ARCore does not repair the scale, so every later frame of that
+tracking segment is rejected as well. A single bad frame on its own is dropped and tracking continues.
+
+A new segment starts when the browser reports that AR restarted its coordinate origin (the WebXR reference
+space "reset" event, sent with each frame as `ar_segment`): ARCore then re-initialises its scale, so the new
+segment is checked afresh. Positions of two segments are in different coordinates and are never mixed: the room
+and every other measurement use the segment with the most trusted frames.
 """
 
 from __future__ import annotations
@@ -96,13 +101,18 @@ class TrackingReport:
         return f"{head}: {self.first_failure}" if self.first_failure else head
 
 
-def assess(metas: Sequence[FrameMeta], load_depth: Callable[[FrameMeta], np.ndarray | None]) -> TrackingReport:
+def segment_of(m: FrameMeta) -> int:
+    seg = (m.extra or {}).get("ar_segment")
+    return int(seg) if isinstance(seg, (int, float)) else 0
+
+
+def _assess_segment(
+    frames: list[FrameMeta], load_depth: Callable[[FrameMeta], np.ndarray | None]
+) -> tuple[set[int], dict[int, str], TrackingMonitor]:
     mon = TrackingMonitor()
     trusted: set[int] = set()
     rejected: dict[int, str] = {}
-    for m in sorted(metas, key=lambda m: m.seq):
-        if not m.pose:
-            continue
+    for m in frames:
         ok, reason = mon.check(m, load_depth(m))
         if ok:
             trusted.add(m.seq)
@@ -115,4 +125,27 @@ def assess(metas: Sequence[FrameMeta], load_depth: Callable[[FrameMeta], np.ndar
             if first_bad - 2 <= s < first_bad:
                 trusted.discard(s)
                 rejected[s] = "just before AR tracking was lost"
-    return TrackingReport(trusted, rejected, mon.lost_for_good, mon.first_failure)
+    return trusted, rejected, mon
+
+
+def assess(metas: Sequence[FrameMeta], load_depth: Callable[[FrameMeta], np.ndarray | None]) -> TrackingReport:
+    segments: dict[int, list[FrameMeta]] = {}
+    for m in sorted(metas, key=lambda m: m.seq):
+        if m.pose:
+            segments.setdefault(segment_of(m), []).append(m)
+    results = {seg: _assess_segment(frames, load_depth) for seg, frames in segments.items()}
+    trusted: set[int] = set()
+    rejected: dict[int, str] = {}
+    if not results:
+        return TrackingReport(trusted, rejected, False, "")
+    main = max(results, key=lambda seg: (len(results[seg][0]), -seg))
+    for seg, (ok, bad, _) in results.items():
+        rejected.update(bad)
+        if seg == main:
+            trusted |= ok
+        else:
+            for s in ok:
+                rejected[s] = f"another AR tracking segment (origin restarted); measurements use segment {main}"
+    mon = results[main][2]
+    first_failure = mon.first_failure or next((r[2].first_failure for r in results.values() if r[2].first_failure), "")
+    return TrackingReport(trusted, rejected, mon.lost_for_good, first_failure)

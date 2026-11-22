@@ -57,6 +57,19 @@ export async function startAR() {
   catch (e) { if (xrSession) xrSession.end().catch(() => {}); xrSession = null; document.body.classList.remove("ar"); throw e; }
 }
 
+// The room part of a camera sweep, in AR: the camera stream is released and an AR session takes over, so the same
+// sweep goes on with metric pose and depth for the room (spines were read from the sharper camera stream). Must be
+// called from a tap: an AR session needs a user gesture. If AR cannot start, the sweep goes on with the camera.
+export async function switchToAR() {
+  if (xrSession) return;
+  if (camTimer) { clearInterval(camTimer); camTimer = null; }
+  if (camStream) { camStream.getTracks().forEach((t) => t.stop()); camStream = null; }
+  window.removeEventListener("devicemotion", onMotion);
+  $("video").hidden = true;
+  try { await startAR(); }
+  catch (e) { await startCamera(); throw e; }
+}
+
 async function setupAR() {
   xrSession = await navigator.xr.requestSession("immersive-ar", {
     requiredFeatures: ["local-floor"],
@@ -71,7 +84,7 @@ async function setupAR() {
   const binding = ("XRWebGLBinding" in window) ? new XRWebGLBinding(xrSession, gl) : null;
   const fb = gl.createFramebuffer();
   const c2d = $("canvas"), ctx = c2d.getContext("2d");
-  let last = 0, busy = false, warned = false, arState = "", stable = 0, startPos = null;
+  let last = 0, busy = false, warned = false, arState = "", stable = 0, startPos = null, arSegment = 0;
 
   stats.mode = "ar";
   const setState = (s, why = "") => {
@@ -81,6 +94,13 @@ async function setupAR() {
     status({ starting: "Move the phone slowly left and right to start AR…", ready: "AR tracking. Sweep the room slowly.",
              lost: "AR lost tracking: hold still, then move slowly." }[s]);
   };
+
+  // ARCore restarted its coordinate origin: positions before and after are not comparable, so frames carry the
+  // segment number and tracking must settle again before frames are trusted.
+  ref.addEventListener("reset", () => {
+    arSegment++; stable = 0; startPos = null;
+    setState("starting", `AR restarted its origin (reference space reset ${arSegment})`);
+  });
 
   const onFrame = (t, frame) => {
     xrSession.requestAnimationFrame(onFrame);
@@ -129,7 +149,8 @@ async function setupAR() {
     const intrinsics = { fx: p[0] * W / 2, fy: p[5] * H / 2, cx: (1 - p[8]) * W / 2, cy: (1 + p[9]) * H / 2, width: W, height: H };
     const d = sampleDepth(frame, view, W, H);
     const header = { t: Math.round(t - tStart), pose: Array.from(view.transform.matrix), intrinsics,
-                     emulated: !!pose.emulatedPosition, ar_trusted: trusted, depth_w: d ? d.dw : 0, depth_h: d ? d.dh : 0 };
+                     emulated: !!pose.emulatedPosition, ar_trusted: trusted, ar_segment: arSegment,
+                     depth_w: d ? d.dw : 0, depth_h: d ? d.dh : 0 };
     c2d.width = W; c2d.height = H; ctx.putImageData(img, 0, 0);
     c2d.toBlob(async (blob) => {
       try { if (blob) { sendFrame(header, await blob.arrayBuffer(), d && d.depth); count("sent"); } else count("encode_failed"); }

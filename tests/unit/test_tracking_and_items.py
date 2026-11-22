@@ -79,3 +79,18 @@ def test_keyboard_inside_laptop_is_part_of_it():
         itemtrack.Sighting(1, 2, "keyboard", (200, 60, 280, 95), 0.7),
     ]
     assert [x.index for x in itemtrack.drop_parts(s)] == [0, 2]
+
+
+def test_a_new_tracking_segment_after_an_origin_reset_is_checked_afresh():
+    def seg_meta(seq, t_ms, x, seg):
+        m = meta(seq, t_ms, x)
+        m.extra["ar_segment"] = seg
+        return m
+
+    runaway = [0, 0.05, 0.8, 2.0, 3.5, 3.6]  # scale lost in segment 0
+    frames = [seg_meta(i + 1, i * 600, x, 0) for i, x in enumerate(runaway)]
+    # After the browser's reset event the phone walks slowly in new coordinates.
+    frames += [seg_meta(10 + i, 6000 + i * 600, 0.1 * i, 1) for i in range(12)]
+    r = assess(frames, no_depth)
+    assert r.trusted == set(range(10, 22))  # the longer, clean segment
+    assert all(s in r.rejected for s in range(1, 7))

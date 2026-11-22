@@ -57,8 +57,9 @@ class GuideState:
 
 
 class Guide:
-    def __init__(self) -> None:
+    def __init__(self, ar_room: bool = False) -> None:
         self.st = GuideState()
+        self.ar_room = ar_room  # camera sweep on a phone with AR: the room step switches to AR for metric depth
 
     # ------------------------------------------------------------------ what the phone and the pipeline see
     def tags(self) -> dict[str, Any]:
@@ -82,8 +83,13 @@ class Guide:
                 "type": "guide",
                 "step": s.step,
                 "title": "Room",
-                "text": "Pan slowly across the walls, the floor and everything in the room. Say I'm done at the end.",
-                "actions": [],
+                "text": (
+                    "Tap Measure room (AR), move the phone slowly until AR is ready, then pan across every wall, "
+                    "the floor and the ceiling. Say I'm done at the end."
+                    if self.ar_room
+                    else "Pan slowly across the walls, the floor and everything in the room. Say I'm done at the end."
+                ),
+                "actions": [{"id": "ar_room", "label": "Measure room (AR)"}] if self.ar_room else [],
             }
         return {"type": "guide", "step": s.step, "title": "Done", "text": "Building the claim packet.", "actions": []}
 
@@ -129,6 +135,12 @@ class Guide:
             return f"Shelf {s.shelf}. Same again, slowly from left to right.", False
         if action == "books_done" and s.step == STEP_BOOKS:
             s.step = STEP_ROOM
+            if self.ar_room:
+                return (
+                    "Got the shelves. Now tap Measure room on the screen, move the phone slowly until AR is ready, "
+                    "then pan across every wall, the floor and the ceiling, and say I'm done.",
+                    False,
+                )
             return (
                 "Got the shelves. Now pan slowly across the walls, the floor and everything in the room, "
                 "then say I'm done.",

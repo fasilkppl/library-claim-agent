@@ -1,6 +1,6 @@
 // Phone client entry point: wires the page, the socket, audio and capture together.
 import { playAgentAudio, startMic, stopPlayback } from "./js/audio.js";
-import { startAR, startCamera, startSweepClock, stopCapture } from "./js/capture.js";
+import { startAR, startCamera, startSweepClock, stopCapture, switchToAR } from "./js/capture.js";
 import { connect, sendJson } from "./js/net.js";
 import {
   $, hint, initTabs, log, renderGuide, renderInventory, renderPacket, setConnected, setLocale, setPhase, status,
@@ -21,7 +21,7 @@ function onJson(m) {
     case "tool": log(`[recorded ${m.name}]`, "s"); if (m.name === "set_locale") releaseStart(); break;
     case "audio_stop": stopPlayback(); break;
     case "inventory": renderInventory(m); break;
-    case "guide": renderGuide(m, (action) => sendJson({ type: "guide", action })); break;
+    case "guide": renderGuide(m, (action) => (action === "ar_room" ? arRoom() : sendJson({ type: "guide", action }))); break;
     case "state":
       if (m.state === "processing") { stopCapture(); $("guide").hidden = true; setPhase("processing"); status("Sweep ended. Building the claim packet…"); }
       if (m.state === "failed") { setPhase("failed"); status("The packet could not be built. The frames are saved; reload the page to start again."); }
@@ -53,13 +53,14 @@ $("btnConnect").onclick = async () => {
     // AR is opt-in (open the page with ?ar=1): on phones whose AR tracking keeps failing, the AR sweep loses
     // frames and measurements, so the camera sweep is the default.
     const arWanted = new URLSearchParams(location.search).has("ar");
-    arSupported = arWanted && !!(navigator.xr && await navigator.xr.isSessionSupported("immersive-ar").catch(() => false));
+    xrAvailable = !!(navigator.xr && await navigator.xr.isSessionSupported("immersive-ar").catch(() => false));
+    arSupported = arWanted && xrAvailable;
     sendJson({ type: "hello", locale: navigator.language, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-               device: navigator.userAgent, capture_mode: arSupported ? "webxr" : "camera",
+               device: navigator.userAgent, capture_mode: arSupported ? "webxr" : "camera", ar_room: xrAvailable,
                marker_side_cm: $("chkMarker").checked ? MARKER_CM : null });
     setPhase("connected", { ar: arSupported });
     holdStartUntilAnswered();
-    if (!arSupported) log("Camera sweep (AR off): the room is not measured.", "s");
+    if (!arSupported) log(xrAvailable ? "Camera sweep; the room is measured in AR at the room step." : "Camera sweep (no AR on this phone): the room is not measured.", "s");
   } catch (e) { status(`Could not start: ${e}`); $("btnConnect").disabled = false; }
 };
 
@@ -86,6 +87,18 @@ async function begin(kind) {
     log(`Could not start the ${kind} sweep: ${e}`, "h"); setPhase("connected", { ar: arSupported }); return;
   }
   startSweepClock(); sendJson({ type: "start" });
+}
+// Room step of a camera sweep: switch the same sweep to AR for metric depth (a tap starts it, as AR requires).
+let xrAvailable = false;
+async function arRoom() {
+  try {
+    await switchToAR();
+    sendJson({ type: "client_log", event: "ar_room_started" });
+    for (const b of $("guideActions").querySelectorAll("button")) if (b.textContent.includes("AR")) b.hidden = true;
+  } catch (e) {
+    sendJson({ type: "client_error", message: `could not start AR for the room: ${e}` });
+    log(`AR could not start (${e}); the sweep goes on with the camera.`, "h");
+  }
 }
 $("btnAR").onclick = () => begin("ar");
 $("btnCam").onclick = () => begin("camera");

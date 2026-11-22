@@ -16,7 +16,7 @@ from typing import Any
 import numpy as np
 
 from claimagent.capture.store import FrameMeta, SweepStore
-from claimagent.capture.tracking import TrackingMonitor
+from claimagent.capture.tracking import TrackingMonitor, segment_of
 from claimagent.config import Settings
 from claimagent.pipeline.household import CATEGORY
 
@@ -48,6 +48,7 @@ class _State:
     prev_pose: np.ndarray | None = None
     prev_t: float = 0.0
     tracking: TrackingMonitor = field(default_factory=TrackingMonitor)
+    tracking_segment: int = 0
     tracking_warned: bool = False
 
 
@@ -99,6 +100,9 @@ class Coach:
         """Pose-based rules: AR tracking health, turning speed, which directions were covered."""
         if not meta.pose:
             return
+        seg = segment_of(meta)
+        if seg != self.st.tracking_segment:  # AR restarted its origin: a fresh check, positions start anew
+            self.st.tracking_segment, self.st.tracking, self.st.tracking_warned = seg, TrackingMonitor(), False
         ok, reason = self.st.tracking.check(meta, self.store.load_depth(meta))
         if not ok and self.st.tracking.lost_for_good and not self.st.tracking_warned:
             self.st.tracking_warned = True
