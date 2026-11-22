@@ -14,7 +14,6 @@ from claimagent.config import get_settings
 from claimagent.pipeline import geometry as geo
 from claimagent.pipeline import itemtrack, vlm
 from claimagent.pipeline.household import CATEGORY
-from claimagent.pipeline.register import Registrar
 from claimagent.pipeline.stages.common import camera_of
 
 log = logging.getLogger(__name__)
@@ -61,7 +60,6 @@ def guided_items(store: SweepStore) -> list[dict[str, Any]]:
 
 def collect_items(
     store: SweepStore,
-    reg: Registrar,
     det: dict[int, dict[str, Any]],
     selected: list[FrameMeta],
     vlm_budget_s: float = vlm.BUDGET_S,

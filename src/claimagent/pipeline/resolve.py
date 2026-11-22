@@ -195,6 +195,7 @@ def same_work(a: str, b: str) -> bool:
     return bool(ma and mb) and fuzz.ratio(ma, mb) >= 88
 
 
+@lru_cache(maxsize=4096)  # scoring calls it once per candidate with the same spine text
 def ocr_clean(text: str) -> str:
     """Three common OCR slips on spines, repaired against a word list: one stray letter at the end of a word
     ("GARDENX" -> garden, "HISTORYA" -> history), a small word glued to the next ("SONGOF" -> song of), and a
@@ -233,6 +234,7 @@ def _words_by_length() -> dict[int, list[str]]:
     return out
 
 
+@lru_cache(maxsize=8192)  # about 4 ms a word (a scan of the word list): 90 % of the lookups' CPU time uncached
 def _closest_word(low: str) -> str | None:
     """The one dictionary word within two letter edits (same first letter), or None when none or several are."""
     near = [

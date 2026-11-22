@@ -1,4 +1,7 @@
-"""Runs the post-sweep stages in order, times each one, and writes the packet, report and metrics."""
+"""Runs the post-sweep stages, times each one, and writes the packet, report and metrics.
+
+The items need only the frame analysis, so they are named (local vision model) on a second thread while the
+books are registered, read and looked up (mostly network waits); the room and the prices wait for both."""
 
 from __future__ import annotations
 
@@ -6,9 +9,10 @@ import json
 import logging
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-from claimagent.capture.store import SweepStore
+from claimagent.capture.store import FrameMeta, SweepStore
 from claimagent.config import Settings, get_settings
 from claimagent.contract import ClaimPacket
 from claimagent.pipeline import stages
@@ -138,45 +142,20 @@ def run_pipeline(
         ),
     )
     selected = [m for m in selected if m.seq in det]  # frames left unanalysed (time budget) are not used
-    det_books = books_only(det, frames)
-    reg, _ = step("register", lambda: stages.register_tracks(store, selected, det_books))
-    read = step("read", lambda: stages.read_tracks(store, reg, det_books, selected, frame_analyzer.models.reader))
-    # One time budget for the packet: the slow lookups get what is left, so the packet is always due in time.
-    resolved = step(
-        "resolve", lambda: stages.resolve_books(store, read, resolver, s, _left(t_all, RESERVE_AFTER_RESOLVE, 20, 70))
+    # 60-90 s for naming the items from their pictures: with 25 s the first check timed out and every item kept
+    # the detector's guess; with 45 s a live sweep named 11 of 26. Run beside the book stages, not after them.
+    side = ThreadPoolExecutor(max_workers=1, thread_name_prefix="items")
+    items_job = side.submit(
+        step, "items", lambda: stages.collect_items(store, det, selected, _left(t_all, RESERVE_AFTER_ITEMS, 60, 90))
     )
-    read, resolved = step(
-        "second_look",
-        lambda: stages.second_look(
-            store,
-            reg,
-            det_books,
-            selected,
-            read,
-            resolved,
-            resolver,
-            s,
-            min(30.0, _left(t_all, RESERVE_AFTER_RESOLVE, 0, 30)),
-        ),
-    )
-    # Where each spine was in each frame: two spines side by side in one frame are two books.
-    boxes = {t.id: {o.seq: o.corners.tolist() for o in t.observations} for t in reg.tracks}
-    read, resolved = step("dedupe", lambda: _dedupe(store, read, resolved, boxes))
-    resolved = step(
-        "verify", lambda: _verify(store, read, resolved, resolver, _left(t_all, RESERVE_AFTER_VERIFY, 5, 15))
-    )
-    measured = step(
-        "measure",
-        lambda: stages.measure_books(
-            store, reg, det_books, selected, read, resolved, resolver, s, _left(t_all, RESERVE_AFTER_RULERS, 5, 20)
-        ),
-    )
-    items = step(
-        # 60-90 s for naming the items from their pictures: with 25 s the first check timed out and every item kept
-        # the detector's guess; with 45 s a live sweep named 11 of 26. The packet stays inside the brief's 5 minutes.
-        "items",
-        lambda: stages.collect_items(store, reg, det, selected, _left(t_all, RESERVE_AFTER_ITEMS, 60, 90)),
-    )
+    try:
+        book_parts = _book_stages(store, s, frames, selected, det, frame_analyzer, resolver, step, t_all)
+        t_wait = time.perf_counter()
+        items = items_job.result()
+        timings["items_wait"] = round(time.perf_counter() - t_wait, 2)  # the book stages' lead over the items
+    finally:
+        side.shutdown(wait=True)
+    read, resolved, measured = book_parts
     room = step("room", lambda: stages.measure_room(store, list(frames.values()), items, tracking))
 
     session = store.read_session()
@@ -214,6 +193,54 @@ def run_pipeline(
     if progress:
         progress("done", {"packet": f"/sweeps/{store.id}/claim_packet.json"})
     return packet
+
+
+def _book_stages(
+    store: SweepStore,
+    s: Settings,
+    frames: dict[int, FrameMeta],
+    selected: list[FrameMeta],
+    det: dict[int, dict[str, Any]],
+    frame_analyzer: FrameAnalyzer,
+    resolver: Resolver,
+    step: Callable[[str, Callable[[], Any]], Any],
+    t_all: float,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Registration, reading, title lookups, dedupe, author check and measurement of the books."""
+    det_books = books_only(det, frames)
+    reg, _ = step("register", lambda: stages.register_tracks(store, selected, det_books))
+    read = step("read", lambda: stages.read_tracks(store, reg, det_books, selected, frame_analyzer.models.reader))
+    # One time budget for the packet: the slow lookups get what is left, so the packet is always due in time.
+    resolved = step(
+        "resolve", lambda: stages.resolve_books(store, read, resolver, s, _left(t_all, RESERVE_AFTER_RESOLVE, 20, 70))
+    )
+    read, resolved = step(
+        "second_look",
+        lambda: stages.second_look(
+            store,
+            reg,
+            det_books,
+            selected,
+            read,
+            resolved,
+            resolver,
+            s,
+            min(30.0, _left(t_all, RESERVE_AFTER_RESOLVE, 0, 30)),
+        ),
+    )
+    # Where each spine was in each frame: two spines side by side in one frame are two books.
+    boxes = {t.id: {o.seq: o.corners.tolist() for o in t.observations} for t in reg.tracks}
+    read, resolved = step("dedupe", lambda: _dedupe(store, read, resolved, boxes))
+    resolved = step(
+        "verify", lambda: _verify(store, read, resolved, resolver, _left(t_all, RESERVE_AFTER_VERIFY, 5, 15))
+    )
+    measured = step(
+        "measure",
+        lambda: stages.measure_books(
+            store, reg, det_books, selected, read, resolved, resolver, s, _left(t_all, RESERVE_AFTER_RULERS, 5, 20)
+        ),
+    )
+    return read, resolved, measured
 
 
 def write_packet(store: SweepStore, packet: ClaimPacket) -> None:
