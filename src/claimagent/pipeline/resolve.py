@@ -454,7 +454,8 @@ class Resolver:
             variants.append(" ".join(plain[:5]))
         # OCR misreads one letter in a word ("nacb" for "nach") and every query above contains it:
         # last resort, pairs of the longest words.
-        longest = sorted(set(content_tokens(spine_text)), key=len, reverse=True)[:4]
+        # Longest first, equal lengths alphabetically: a set's order changes from run to run (string hashing).
+        longest = sorted(set(content_tokens(spine_text)), key=lambda w: (-len(w), w))[:4]
         variants += [f"{a} {b}" for i, a in enumerate(longest) for b in longest[i + 1 :]]
         seen: list[str] = []
         for v in primary:

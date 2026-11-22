@@ -241,3 +241,19 @@ def test_a_record_far_from_the_works_median_page_count_is_an_unusual_edition():
     t, why = Resolver(_Http()).catalogue_thickness_cm("V", title="A Tale of Two Cities", author="Charles Dickens")
     assert t == 2.4 and "unusual edition" in why
     assert without_author_prefix("A Tale of Two Cities -", ["Charles Dickens"]) == "A Tale of Two Cities"
+
+
+def test_query_variants_do_not_depend_on_set_order():
+    import os
+    import subprocess
+    import sys
+
+    spine = "Phystcull | Sambursky | of the | Greeks | World | und ihre moderne Verwandlung"
+    code = f"from claimagent.pipeline.resolve import Resolver; print(Resolver(None).query_variants({spine!r}))"
+    runs = {
+        subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, env={**os.environ, "PYTHONHASHSEED": seed}
+        ).stdout
+        for seed in ("1", "2", "3", "4")
+    }
+    assert len(runs) == 1, runs  # the same queries whatever the string hashing
