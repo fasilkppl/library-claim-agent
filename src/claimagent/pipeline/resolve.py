@@ -11,6 +11,7 @@ import logging
 import math
 import re
 import statistics
+import threading
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -631,27 +632,78 @@ class Resolver:
         google_queries: int = GOOGLE_QUERIES_PER_TEXT,
         rounds: int = MAX_VARIANTS,
     ) -> dict[str, Resolution]:
-        """Many spine texts in rounds: round k sends the k-th query of every text still open, Open Library's
-        batched into few requests and Google Books' one per text. A text stops at a candidate scoring `accept`
-        (as in resolve) or when a candidate in the sweep's pool explains it at `pool_accept`. No round starts
-        after the deadline or after `rounds` rounds; every text is decided on the candidates found by then."""
+        """Many spine texts at once, in rounds of their queries (round k: each open text's k-th query).
+
+        Open Library rounds go out batched (few requests a round, at its 1 request a second) and close a text
+        on a candidate scoring `accept` or on a pooled record explaining it at `pool_accept`. Google Books runs
+        its own rounds beside them (100 queries a minute is slower than the batches): round k queries the texts
+        that neither source had settled after Open Library's round k-1. Neither waits for the other, and every
+        choice of what to query reads only finished rounds, so a replay sends the same requests. No round starts
+        after the deadline or after `rounds` rounds; each text is decided on all the candidates found by then."""
         state = {t: _Lookup(self.query_variants(t)) for t in texts}
         words = {t: set(content_tokens(t)) for t in texts}
         # More readable words first: those texts are likelier to be named, so they get the early requests.
         order = sorted(texts, key=lambda t: (-len(words[t]), t))
+        n_rounds = min(rounds, max((len(st.variants) for st in state.values()), default=0))
+        ol_best: dict[str, list[float]] = {t: [] for t in texts}  # Open Library's best after each of its rounds
+        closed_at: dict[str, int] = {}  # round at whose start the pool settled the text (-1: before any)
+        gb_cands: dict[str, list[Candidate]] = {t: [] for t in texts}
+        gb_best = dict.fromkeys(texts, 0.0)
+        gb_asked = dict.fromkeys(texts, 0)  # Google rounds sent for the text
+        progress = threading.Condition()
+        ol_round = [-1, False]  # last finished Open Library round; Open Library finished
+
+        def settled_before(t: str, k: int) -> bool:
+            """Whether Open Library (with the pool) had settled the text by the end of its round k-1."""
+            if closed_at.get(t, k) <= k - 1:
+                return True
+            if k <= 0:
+                return False
+            hist = ol_best[t]
+            best = hist[min(k - 1, len(hist) - 1)] if hist else 0.0
+            return best >= accept or closed_at.get(t, k) <= k - 1
+
+        def google_rounds() -> None:
+            with ThreadPoolExecutor(max_workers=GOOGLE_WORKERS, thread_name_prefix="google") as pool:
+                for k in range(min(google_queries, n_rounds)):
+
+                    def ready(k: int = k) -> bool:
+                        return ol_round[0] >= k - 1 or bool(ol_round[1])
+
+                    with progress:
+                        progress.wait_for(ready)
+                    todo = [
+                        t
+                        for t in order
+                        if k < len(state[t].variants) and gb_best[t] < accept and not settled_before(t, k)
+                    ]
+                    if not todo or self._late():
+                        return
+                    found = list(pool.map(lambda t, k=k: self._google(t, state[t].variants[k]), todo))
+                    with progress:
+                        for t, cands in zip(todo, found, strict=True):
+                            cands = [c for c in cands if not derivative(c)]
+                            gb_asked[t] = k + 1
+                            gb_cands[t] += cands
+                            gb_best[t] = max([gb_best[t], *(score(t, c)[0] for c in cands)])
+
         open_ = set(texts)
-        google = ThreadPoolExecutor(max_workers=GOOGLE_WORKERS, thread_name_prefix="google")
+        for t in order:  # before any request: texts a pooled record already explains need none
+            if self._pool_explains(t, state[t], words[t], accept, pool_accept):
+                open_.discard(t)
+                closed_at[t] = -1
+        google = threading.Thread(target=google_rounds, name="google-rounds", daemon=True)
+        google.start()
         try:
-            k = 0
-            while open_ and not self._late() and k < rounds:
+            for k in range(n_rounds):
+                if self._late():
+                    break
                 for t in order:
                     if t in open_ and self._pool_explains(t, state[t], words[t], accept, pool_accept):
                         open_.discard(t)
+                        closed_at[t] = k
                 todo = [t for t in order if t in open_ and k < len(state[t].variants)]
-                if not todo:
-                    break
                 query = {t: state[t].variants[k] for t in todo}
-                jobs = {t: google.submit(self._google, t, query[t]) for t in todo if k < google_queries}
                 ol: dict[str, list[Candidate]] = {}
                 batch = list(dict.fromkeys(query[t] for t in todo))
                 for i in range(0, len(batch), OL_BATCH):
@@ -659,9 +711,7 @@ class Resolver:
                         ol.update(self.openlibrary_batch(batch[i : i + OL_BATCH]))
                 found_now: list[Candidate] = []
                 for t in todo:
-                    found = [
-                        c for c in ol.get(query[t], []) + (jobs[t].result() if t in jobs else []) if not derivative(c)
-                    ]
+                    found = [c for c in ol.get(query[t], []) if not derivative(c)]
                     st = state[t]
                     st.queries.append(query[t])
                     st.cands += found
@@ -670,16 +720,31 @@ class Resolver:
                     if st.best >= accept:
                         open_.discard(t)
                 self.pool += found_now
-                k += 1
+                with progress:
+                    for t in texts:
+                        ol_best[t].append(state[t].best)
+                    ol_round[0] = k
+                    progress.notify_all()
+                if not todo:
+                    break
         finally:
-            google.shutdown(wait=False, cancel_futures=True)
+            with progress:
+                ol_round[1] = True
+                progress.notify_all()
+        left = None if self.deadline is None else max(0.0, self.deadline - time.monotonic()) + 2.0
+        google.join(left)
+        with progress:
+            google_found = {t: list(gb_cands[t]) for t in texts}
+            gb_asked = dict(gb_asked)
         out = {}
         for t in texts:
             st = state[t]
-            res = self.decide(t, st.cands + st.from_pool, st.queries, accept)
+            asked = st.variants[: max(len(st.queries), gb_asked[t])]
+            res = self.decide(t, st.cands + google_found[t] + st.from_pool, asked, accept)
             if st.pool_best >= pool_accept:
                 res.evidence["matched_through"] = "a catalogue record found for another spine of this sweep"
             out[t] = res
+        self.pool += [c for t in texts for c in google_found[t]]
         return out
 
     def decide(self, spine_text: str, cands: list[Candidate], queries: list[str], accept: float) -> Resolution:
@@ -845,6 +910,8 @@ class Resolver:
     def _openlibrary_search_thickness(self, title: str, author: str) -> tuple[float, str] | None:
         """The work found by title and author on Open Library: the median page count of its editions (with
         hardcover boards when most are hardcover), else the median the search itself reports."""
+        if self._late():
+            return None  # new requests, unlike the records the height lookup has just read: within the budget
         main = re.sub(r"\s+by\s+.*$", "", title.split(":")[0], flags=re.I).strip()
         surname = (content_tokens(author.split(",")[0]) or [""])[-1]
         params = {"title": main, "fields": "key,title,number_of_pages_median", "limit": 3}

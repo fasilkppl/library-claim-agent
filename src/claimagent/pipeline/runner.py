@@ -55,7 +55,7 @@ PACKET_BUDGET_S = 200.0
 RESERVE_AFTER_ANALYZE = 145.0  # registration, reading, title lookups, rulers, items, prices and the report
 RESERVE_AFTER_RESOLVE = 80.0  # rulers, items, prices and the report after the title lookups
 RESERVE_AFTER_VERIFY = 70.0  # rulers, items, prices and the report after the author check
-RESERVE_AFTER_RULERS = 65.0
+RESERVE_AFTER_RULERS = 25.0  # the room and the report (items and book prices run beside the book stages)
 RESERVE_AFTER_ITEMS = 40.0
 
 
@@ -252,7 +252,7 @@ def _book_stages(
     measured = step(
         "measure",
         lambda: stages.measure_books(
-            store, reg, det_books, selected, read, resolved, resolver, s, _left(t_all, RESERVE_AFTER_RULERS, 5, 20)
+            store, reg, det_books, selected, read, resolved, resolver, s, _left(t_all, RESERVE_AFTER_RULERS, 5, 40)
         ),
     )
     return read, resolved, measured, prices_job

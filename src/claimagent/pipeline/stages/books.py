@@ -588,7 +588,7 @@ SINGLE_READINGS = 3
 # or sweep 185148 and were half of all Google requests (quota: 100 a minute, 1000 a day).
 SINGLE_GOOGLE_QUERIES = 1
 RESOLVE_BUDGET_S = 100.0  # the packet is due within 5 minutes of the sweep
-RULER_BUDGET_S = 30.0
+RULER_BUDGET_S = 40.0  # catalogue heights (rulers) and page counts after the title lookups
 RULER_WORKERS = 6
 # Photo and page-count thickness err in opposite directions: the photo outline takes in a strip of cover or a
 # neighbour's edge (too wide), the page count assumes thin paper (most Indian paperbacks are bulkier). Both
