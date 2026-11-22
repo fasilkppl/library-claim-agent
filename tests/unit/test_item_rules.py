@@ -35,3 +35,34 @@ def test_book_answers_need_spines_and_tables_under_books_stay(monkeypatch):
     assert "kept" in kept["D"]["vision_check"]  # the table the books stand on
     assert [r["id"] for r in removed] == ["C"]  # spines under it: books, counted in the book list
     assert kept["W"]["vision_check"] == "unknown"  # "book" with no spine there: listed, not priced
+
+
+def test_a_mat_in_front_of_a_wall_item_is_not_a_part_of_it():
+    from claimagent.pipeline.vlm import parts_of_other_items
+
+    mirror = {
+        "id": "M",
+        "label": "mirror",
+        "category": "decor",
+        "frame_seq": 1,
+        "bbox": [0, 0, 400, 600],
+        "boxes": {"1": [0, 0, 400, 600]},
+    }
+    mat = {
+        "id": "D",
+        "label": "doormat",
+        "category": "rug",
+        "frame_seq": 1,
+        "bbox": [100, 450, 250, 560],
+        "boxes": {"1": [100, 450, 250, 560]},
+    }
+    print_ = {
+        "id": "P",
+        "label": "kite",
+        "category": "other",
+        "frame_seq": 1,
+        "bbox": [50, 50, 120, 120],
+        "boxes": {"1": [50, 50, 120, 120]},
+    }
+    parts = parts_of_other_items([mirror, mat, print_])
+    assert "D" not in parts and parts.get("P") == "mirror"

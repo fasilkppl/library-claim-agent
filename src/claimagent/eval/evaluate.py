@@ -25,6 +25,46 @@ from claimagent.contract import Book, ClaimPacket
 from claimagent.pipeline.household import CATEGORY
 from claimagent.pipeline.resolve import content_tokens, volume_numbers
 
+# Words that name the same kind of household object (truth sheets and the vision model word things differently).
+OBJECT_SYNONYMS = [
+    {"bin", "dustbin", "trash", "garbage", "waste", "wastebasket"},
+    {"table", "desk"},
+    {"mat", "doormat", "rug", "carpet"},
+    {"pan", "saucepan", "skillet", "frypan", "wok", "kadai", "kadhai"},
+    {"pot", "cooker", "pressure"},
+    {"shelf", "shelves", "shelving", "rack", "bookcase", "bookshelf"},
+    {"box", "carton", "giftbox"},
+    {"hanger", "coathanger"},
+    {"iron"},
+    {"chair", "stool", "seat"},
+    {"bottle", "flask"},
+    {"rod", "pole", "rail"},
+    {"mirror"},
+    {"bucket", "pail"},
+    {"padlock", "lock"},
+]
+_FILLER = {"of", "the", "and", "with", "no", "left", "right", "small", "big", "large", "plastic", "steel", "metal"}
+
+
+def _object_words(text: str) -> set[str]:
+    out: set[str] = set()
+    for w in content_tokens(text):
+        if any(c.isdigit() for c in w) or w in _FILLER:
+            continue
+        forms = {w, w.rstrip("s") if len(w) > 3 else w, w[:-3] + "f" if w.endswith("ves") else w}
+        out |= forms
+        for group in OBJECT_SYNONYMS:
+            if forms & group:
+                out |= group
+    return out
+
+
+def same_object(truth: str, system: str) -> bool:
+    """The packet's description names the same kind of object as the truth sheet's ("water bottle 720 ml" ~
+    "bottle", "brown pedal dustbin" ~ "trash can", "tea pan (saucepan)" ~ "saucepan")."""
+    return bool(_object_words(truth) & _object_words(system))
+
+
 ITEM_CATEGORY_ALIASES = {
     "shelf": "shelving",
     "bookcase": "shelving",
@@ -314,21 +354,27 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
         ],
     )
     if items_gt:
-        sys_cats = [i.category for i in p.items]
+        # "Found, with correct category": a packet item of the same category that names the same kind of object
+        # (water bottle ~ bottle, dustbin ~ trash can), each packet item used for one truth item at most. The
+        # category alone is not enough: a mug must not count as the frying pan that was missed.
+        left = list(p.items)
         found = 0
         for r in items_gt:
             raw = r["category"].strip().lower()
             cat = ITEM_CATEGORY_ALIASES.get(raw) or CATEGORY.get(raw, raw)
-            hit_item = cat in sys_cats
-            if hit_item:
-                sys_cats.remove(cat)
+            item_hit = next(
+                (i for i in left if i.category == cat and same_object(r.get("description", ""), i.description)), None
+            )
+            if item_hit is not None:
+                left.remove(item_hit)
                 found += 1
             res["items"].append(
                 {
                     "n": r.get("item_no", ""),
                     "category": r["category"],
                     "description": r.get("description", ""),
-                    "found": hit_item,
+                    "found": item_hit is not None,
+                    "system_description": item_hit.description if item_hit is not None else "",
                 }
             )
         rate = found / len(items_gt)
@@ -337,7 +383,7 @@ def evaluate(store: SweepStore, truth: Path) -> dict[str, Any]:
             ">= 80% found with correct category",
             f"{rate:.0%} ({found}/{len(items_gt)})",
             rate >= 0.8,
-            {"extra_system_items": len(sys_cats)},
+            {"extra_system_items": len(left)},
         )
     else:
         bar("Non-book items", ">= 80% found", "no ground truth", None)

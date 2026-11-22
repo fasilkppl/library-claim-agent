@@ -191,6 +191,7 @@ def _area(b: Any) -> float:
     return max(0.0, float(b[2]) - float(b[0])) * max(0.0, float(b[3]) - float(b[1]))
 
 
+NEVER_PARTS = {"rug", "seating", "table", "shelving"}  # floor coverings and furniture are things of their own
 HOLDERS = {"table", "shelving", "seating", "rug"}  # categories things stand on or in: inside them is not part of them
 
 
@@ -205,6 +206,8 @@ def parts_of_other_items(items: list[dict[str, Any]]) -> dict[str, str]:
             bb = (b.get("boxes") or {}).get(str(a["frame_seq"]))
             if b is a or bb is None or b.get("category") in HOLDERS or _area(bb) < 2 * _area(ab):
                 continue
+            if a.get("category") in NEVER_PARTS:
+                break  # a mat or a chair in front of a wall item lies inside its box in the picture, not in it
             ix = max(0.0, min(ab[2], bb[2]) - max(ab[0], bb[0]))
             iy = max(0.0, min(ab[3], bb[3]) - max(ab[1], bb[1]))
             if _area(ab) > 0 and ix * iy / _area(ab) >= 0.8:

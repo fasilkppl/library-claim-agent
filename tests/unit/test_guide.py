@@ -142,3 +142,10 @@ def test_a_camera_sweep_on_an_ar_phone_switches_to_ar_for_the_room():
     ui = g.ui()
     assert ui["step"] == "room" and [a["id"] for a in ui["actions"]] == ["ar_room"]
     assert Guide().act("books_done")[0].startswith("Got the shelves. Now pan")  # no AR: no button, no mention
+
+
+def test_im_done_on_the_shelves_asks_for_the_room_once():
+    g = Guide()
+    said, over = g.act("finish")
+    assert not over and g.ui()["step"] == "room" and "room" in said.lower()
+    assert g.act("finish") == ("", True)  # the second time it ends

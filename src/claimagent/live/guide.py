@@ -54,6 +54,7 @@ def _norm(text: str) -> str:
 class GuideState:
     step: str = STEP_BOOKS
     shelf: int = 1
+    room_asked: bool = False
 
 
 class Guide:
@@ -127,6 +128,14 @@ class Guide:
         """Applies an action; returns (what to say, whether the sweep is now over)."""
         s = self.st
         log.info("GUIDE action %s in step %s (shelf %s)", action, s.step, s.shelf)
+        if action == "finish" and s.step == STEP_BOOKS and not s.room_asked:
+            # The walk would end before the room was ever covered (seen: a sweep of the shelves only lost most of
+            # the room's items). The agent asks for the room part once; a second "I'm done" ends the sweep.
+            s.room_asked = True
+            said, _ = self.act("books_done")
+            return "Before we finish: the room itself is still missing. " + said.removeprefix(
+                "Got the shelves. "
+            ), False
         if action == "finish":
             s.step = STEP_DONE
             return "", True
