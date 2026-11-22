@@ -40,7 +40,9 @@ server (`make run`) and the USB link (`make phone`) must be running; otherwise t
    zone; say so if it is wrong).
 2. **Camera-only sweep** (the default; open `/?ar=1` to get the AR sweep instead). Walk the room once: along
    each shelf from left to right, about half a metre away (tap **Next shelf** between shelves and **Books
-   done** at the end, or say it), then pan slowly across the walls, the floor and everything in the room.
+   done** at the end, or say it), then pan slowly across the walls, the floor and everything in the room. At
+   the room step an AR phone shows **Measure room (AR)**: tap it, move until AR is ready, then pan the walls,
+   floor and ceiling (floor and wall area come only from AR depth).
    Talk normally: "skip that shelf, those aren't mine", "that one is a signed first edition", "it's a print".
 3. **Finish sweep**, or say "I'm done". The packet appears on screen (report link and `claim_packet.json`)
    and the agent reads out the summary.
@@ -70,6 +72,10 @@ uv run python -m claimagent.pipeline run --sweep <id> [--offline] [--fresh]   # 
 make eval SWEEP=<id> TRUTH=ground_truth/mine # pass-bar table vs your ground truth -> sweeps/<id>/eval.md
 make reprice SWEEP=<id> COUNTRY=US           # same 10 books priced for a second country
 make marker                                  # docs/marker_10cm.pdf, reference for camera-only sweeps
+make price-sheet SWEEP=<id>                  # blank hand-check sheet (search links only) for the sweep's book prices
+make ar-check LABEL=native SECONDS=45        # ARCore's own log while an AR app runs (phone on USB)
+make ar-sweep SWEEP=<id>                     # AR tracking segments, trust and depth of a sweep
+make submission SWEEP=<id> TRUTH=ground_truth/mine  # packet + frames zip, results sheet, the two notes as PDF
 ```
 
 ## How it works (short)
@@ -118,16 +124,18 @@ assistant.
 
 - **Test space**: 10 books on one shelf and 18 non-book items in one room (the brief asks for at least 60 books
   on 2 shelving units; only 10 books were available). Ground-truth samples are therefore 10 measured spines
-  and 8 hand-checked prices instead of 20 and 15. Numbers are reported on this space only.
+  and 10 reference prices instead of 20 and 15. Numbers are reported on this space only. The reference prices
+  were read from Google Shopping India by the AI assistant (`ground_truth/mine/prices.csv` says so per row),
+  not checked by a person; `make price-sheet` gives the links for a hand check.
 - Capture is a camera sweep on Android Chrome (full 4:3 sensor, 1 frame per 0.9 s). WebXR AR is opt-in
   (`/?ar=1`); without trusted AR the room is reported as not measured.
 - Book count includes books seen whole at least once. Fragments only ever cut by the picture's edge, and
   one-frame glimpses outside the shelf row, are not counted (listed in `stages/dedupe.json`).
 - Edition and ISBN are filled only when the spine shows the publisher of a catalogued edition; otherwise the
   common edition is priced (a reason prices can differ from a specific edition's).
-- Replacement = median of the main price band of new offers in the policyholder's country, from established
-  booksellers when at least two list the book; box sets, study notes, translations and collectors' copies are
-  excluded. Used = median of at least two second-hand offers, never above the new price; else US offers
+- Replacement = median of the cheapest price range holding a third of the new offers in the policyholder's
+  country (a jump of more than 2.5 times separates editions), from established booksellers; searched by title
+  and author, not ISBN; box sets, study notes, translations and collectors' copies are excluded. Used = median of at least two second-hand offers, never above the new price; else US offers
   converted and labelled. Blank (and in review) when neither exists.
 - Appraisal threshold: 150 USD equivalent in local currency, configurable.
 - Wall area = perimeter × ceiling height; doors and windows are not subtracted.
@@ -135,7 +143,8 @@ assistant.
 
 ## Limitations (honest)
 
-- Room areas need ARCore. On the test phone (OnePlus 15, Android 17) ARCore itself fails: a standalone
+- Room areas need ARCore depth; in the submitted sweep the AR room step was not started. On the test phone
+  (OnePlus 15, Android 17) ARCore failed in earlier AR sweeps: a standalone
   ARCore app (AR Ruler), Google's model-viewer demo and our test page (`web/artest.html`) all lose tracking,
   and ARCore logs camera-to-motion-sensor clock offsets of -54 to +44 ms against its 5 ms limit. Our AR
   geometry passes the synthetic replay (floor within 10 %, walls within 15 %). Camera sweeps therefore
