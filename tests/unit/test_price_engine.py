@@ -302,3 +302,10 @@ def test_a_paperback_search_when_no_established_bookseller_lists_the_book():
 
     new, _ = PriceEngine(ByQuery(), FakeEbay(), FakeFx(), FakeGBooks()).book("Rework", "Jason Fried", "", "", "IN")
     assert new.amount == 326.27 and new.query == "Rework Jason Fried paperback" and not new.note
+
+
+def test_two_listings_far_apart_give_the_local_one_not_their_mean():
+    from claimagent.pipeline.price.engine import local_band
+
+    assert local_band([3489.0, 449.0]) == [449.0]  # an imported copy at 7.8 times the local edition
+    assert local_band([449.0, 499.0]) == [449.0, 499.0]  # one edition: both count
