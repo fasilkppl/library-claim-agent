@@ -371,6 +371,7 @@ class Resolution:
     url: str = ""
     volume_id: str = ""
     pages: int | None = None  # the matched record's page count (Google volume, else Open Library's median)
+    size_volume_id: str = ""  # a Google volume of the same work, for the printed size when the match has none
     evidence: dict[str, Any] = field(default_factory=dict)
 
 
@@ -788,8 +789,22 @@ class Resolver:
                 title = title[: m.start()].strip().rstrip(" -–—:;,/").strip()  # "A Tale of Two Cities - by ..."
             res.title, res.author = title, ", ".join(best.authors)
             res.source, res.url, res.volume_id = best.source, best.url, best.volume_id
-            n = best.raw.get("number_of_pages_median") or best.raw.get("volumeInfo", {}).get("pageCount")
-            res.pages = int(n) if isinstance(n, int | float) and n > 0 else None
+            res.pages = _pages(best)
+            # A match without a page count or Google volume (an Open Library work without editions): another record
+            # of the same work by the same author gives them, for the spine size (never for the price).
+            names = {w for a in best.authors for w in content_tokens(a)}
+            for _, c in scored[1:]:
+                if res.pages is not None and (res.volume_id or res.size_volume_id):
+                    break
+                same_author = bool(names & {w for a in c.authors for w in content_tokens(a)})
+                if not (same_author and same_work(c.title, best.title)):
+                    continue
+                if res.pages is None and _pages(c):
+                    res.pages = _pages(c)
+                    res.evidence["pages_from"] = c.url
+                if not res.volume_id and not res.size_volume_id and c.volume_id:
+                    res.size_volume_id = c.volume_id
+                    res.evidence["size_from"] = c.url
             # Edition only when the spine names the publisher of a specific catalogued edition.
             ed = self._edition(spine_text, best, [c for _, c in scored])
             if ed is not None:
@@ -980,6 +995,11 @@ class Resolver:
         dims = (r.data or {}).get("volumeInfo", {}).get("dimensions", {})
         m = re.match(r"([\d.]+)\s*cm", str(dims.get("height", "")))
         return float(m.group(1)) if m else None
+
+
+def _pages(c: Candidate) -> int | None:
+    n = c.raw.get("number_of_pages_median") or c.raw.get("volumeInfo", {}).get("pageCount")
+    return int(n) if isinstance(n, int | float) and n > 0 else None
 
 
 def _fullest_title(best: Candidate, cands: list[Candidate], spine: list[str]) -> str:

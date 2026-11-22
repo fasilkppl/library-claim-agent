@@ -456,7 +456,8 @@ class PriceEngine:
     @staticmethod
     def _figure(offers: list[Offer], condition: str, query: str, local: bool = False) -> PriceFigure:
         amounts = [o.amount for o in offers]
-        if local and len(amounts) > 2:
+        # Two listings far apart (Rs 449 and an imported Rs 3,489) are two editions: their mean is no listing's price.
+        if local and len(amounts) >= 2:
             kept = local_band(amounts)
             med = statistics.median(kept)
         else:

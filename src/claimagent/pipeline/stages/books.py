@@ -236,6 +236,7 @@ RESOLVE_KEYS = (
     "url",
     "volume_id",
     "pages",
+    "size_volume_id",
 )
 
 
@@ -741,11 +742,10 @@ def measure_books(
         # The thickness comes from the records the height lookup has just read, so it is asked right after it
         # (a later round hit the stage's deadline and was skipped).
         r = br[1]
-        h = resolver.catalogue_height_cm(
-            r.get("volume_id", ""), r.get("title", ""), r.get("author", ""), r.get("url", "")
-        )
+        volume = r.get("volume_id") or r.get("size_volume_id") or ""
+        h = resolver.catalogue_height_cm(volume, r.get("title", ""), r.get("author", ""), r.get("url", ""))
         return h, resolver.catalogue_thickness_cm(
-            r.get("volume_id", ""),
+            volume,
             r.get("url", ""),
             check_deadline=False,
             pages_hint=r.get("pages"),
