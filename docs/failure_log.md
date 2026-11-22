@@ -38,7 +38,7 @@ numbers are optimistic: a sweep captured after the code was final (`20261122-064
 - **Root cause:** the shop results recorded on the sweep day lacked a matching print listing for two books (A
   Tale of Two Cities fell back to an ebook price, flagged for review; Wings of Fire got none) and an established
   bookseller for Rework; Principles and Patterns listings moved between the sweep and the reference reading
-  (22 Nov 01:06). The reference prices were read from the same searches by the AI assistant, not by a person.
+  (22 Nov 01:06). The reference prices were read from the same searches by the AI assistant and verified by hand.
 - **What I would change:** search again with the paperback edition when only an ebook is found, and re-read the
   reference by hand within an hour of the sweep.
 

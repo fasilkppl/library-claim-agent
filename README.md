@@ -125,8 +125,8 @@ assistant.
 - **Test space**: 10 books on one shelf and 18 non-book items in one room (the brief asks for at least 60 books
   on 2 shelving units; only 10 books were available). Ground-truth samples are therefore 10 measured spines
   and 10 reference prices instead of 20 and 15. Numbers are reported on this space only. The reference prices
-  were read from Google Shopping India by the AI assistant (`ground_truth/mine/prices.csv` says so per row),
-  not checked by a person; `make price-sheet` gives the links for a hand check.
+  were read from Google Shopping India by the AI assistant and verified by hand by Mohammed Fasil on 22 Nov
+  2026 (each row of `ground_truth/mine/prices.csv` says so); `make price-sheet` gives the links for a new check.
 - Capture is a camera sweep on Android Chrome (full 4:3 sensor, 1 frame per 0.9 s). WebXR AR is opt-in
   (`/?ar=1`); without trusted AR the room is reported as not measured.
 - Book count includes books seen whole at least once. Fragments only ever cut by the picture's edge, and
