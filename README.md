@@ -143,7 +143,10 @@ assistant.
 
 ## Limitations (honest)
 
-- Room areas need ARCore depth; in the submitted sweep the AR room step was not started. On the test phone
+- The submitted packet (sweep `20261121-185148-d1ac89`) was rebuilt with the final code from the sweep's saved
+  frames and recorded responses; the live packet shown in the video is kept beside it. This sweep was used
+  during development; see [docs/failure_log.md](docs/failure_log.md).
+- Room areas need ARCore depth; the submitted sweep predates the AR room step. On the test phone
   (OnePlus 15, Android 17) ARCore failed in earlier AR sweeps: a standalone
   ARCore app (AR Ruler), Google's model-viewer demo and our test page (`web/artest.html`) all lose tracking,
   and ARCore logs camera-to-motion-sensor clock offsets of -54 to +44 ms against its 5 ms limit. Our AR

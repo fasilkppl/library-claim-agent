@@ -59,5 +59,5 @@ go to appraisal unpriced. Totals are computed in code from the lines.
 ## Time budget
 
 The packet is due within 5 minutes. Frame analysis after the walk fills the largest gaps first within its
-budget; slow lookups (titles, rulers) get what remains. Final run: 226 s after "I'm done"; items and book
+budget; slow lookups (titles, rulers) get what remains. Final run: 222 s after "I'm done"; items and book
 prices now run beside the book stages (same sweeps replay in 39-53 s instead of 71-114 s, same results).
