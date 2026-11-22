@@ -1,0 +1,1 @@
+{"url": "https://www.googleapis.com/books/v1/volumes?q=gemeinsamewerke+casares&maxResults=8&printType=books", "status": 200, "retrieved_at": "2026-11-22T00:23:22+00:00", "data": {"kind": "books#volumes", "totalItems": 0}}
