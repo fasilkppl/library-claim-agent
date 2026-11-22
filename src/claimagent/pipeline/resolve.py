@@ -14,7 +14,7 @@ import statistics
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -132,7 +132,6 @@ PAGE_CM = 0.0055  # printed thickness per page (about 0.11 mm a sheet), for a sp
 COVER_CM = 0.25  # both covers of a paperback together
 HARDCOVER_CM = 0.45  # both boards of a hardcover
 ODD_EDITION = 1.5  # a record's page count this far from the work's median is an unusual edition
-LIVE_QUERIES = 2  # during the walk: the two broadest queries only, so a title is said within seconds
 
 GLUE_WORDS = {"of", "the", "and", "to", "in", "on", "for", "with", "a", "an", "der", "die", "das", "und"}
 
@@ -438,6 +437,17 @@ def clause_matches(query: str, cand: Candidate) -> bool:
     return hits >= math.ceil(CLAUSE_MATCH * len(words))
 
 
+POOL_STAGE = "live_pool"  # the candidates found by the lookups during the walk, for the packet's lookups
+
+
+def pool_to_json(pool: list[Candidate]) -> dict[str, Any]:
+    return {"candidates": [asdict(c) for c in pool]}
+
+
+def pool_from_json(data: dict[str, Any]) -> list[Candidate]:
+    return [Candidate(**c) for c in data.get("candidates", [])]
+
+
 @dataclass
 class _Lookup:
     """One spine text's lookups across rounds."""
@@ -445,6 +455,7 @@ class _Lookup:
     variants: list[str]
     cands: list[Candidate] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    best: float = 0.0  # best score among cands (scored once each, as they arrive)
     pool_seen: int = 0  # pool candidates already compared with this text
     pool_best: float = 0.0
     from_pool: list[Candidate] = field(default_factory=list)
@@ -559,19 +570,16 @@ class Resolver:
             pass
         return out
 
-    def resolve(self, spine_text: str, accept: float, live: bool = False) -> Resolution:
-        """`live`: during the walk, a fast answer from Google Books' first queries only (Open Library takes
-        5-30 s per query); the full lookup runs after the sweep for the packet."""
+    def resolve(self, spine_text: str, accept: float) -> Resolution:
+        """One spine text, its queries one after another (many texts: resolve_many)."""
         cands: list[Candidate] = []
         queries: list[str] = []
         for k, q in enumerate(self.query_variants(spine_text)):
             if self.deadline is not None and time.monotonic() > self.deadline:
                 break  # the packet must not wait: what is not resolved by now stays unidentified
-            if live and k >= LIVE_QUERIES:
-                break
             queries.append(q)
             # Google Books is rate-limited (100 per minute): it gets the first, broadest queries only.
-            found = self.candidates(spine_text, q, google=k < GOOGLE_QUERIES_PER_TEXT, openlibrary=not live)
+            found = self.candidates(spine_text, q, google=k < GOOGLE_QUERIES_PER_TEXT)
             for c in found:
                 if derivative(c):
                     log.debug("resolve: %r by %s is a book about another book; not a match", c.title, c.authors)
@@ -616,12 +624,17 @@ class Resolver:
         return st.pool_best >= pool_accept
 
     def resolve_many(
-        self, texts: list[str], accept: float, pool_accept: float, google_queries: int = GOOGLE_QUERIES_PER_TEXT
+        self,
+        texts: list[str],
+        accept: float,
+        pool_accept: float,
+        google_queries: int = GOOGLE_QUERIES_PER_TEXT,
+        rounds: int = MAX_VARIANTS,
     ) -> dict[str, Resolution]:
         """Many spine texts in rounds: round k sends the k-th query of every text still open, Open Library's
         batched into few requests and Google Books' one per text. A text stops at a candidate scoring `accept`
         (as in resolve) or when a candidate in the sweep's pool explains it at `pool_accept`. No round starts
-        after the deadline; every text is decided on the candidates found by then."""
+        after the deadline or after `rounds` rounds; every text is decided on the candidates found by then."""
         state = {t: _Lookup(self.query_variants(t)) for t in texts}
         words = {t: set(content_tokens(t)) for t in texts}
         # More readable words first: those texts are likelier to be named, so they get the early requests.
@@ -630,7 +643,7 @@ class Resolver:
         google = ThreadPoolExecutor(max_workers=GOOGLE_WORKERS, thread_name_prefix="google")
         try:
             k = 0
-            while open_ and not self._late():
+            while open_ and not self._late() and k < rounds:
                 for t in order:
                     if t in open_ and self._pool_explains(t, state[t], words[t], accept, pool_accept):
                         open_.discard(t)
@@ -646,12 +659,15 @@ class Resolver:
                         ol.update(self.openlibrary_batch(batch[i : i + OL_BATCH]))
                 found_now: list[Candidate] = []
                 for t in todo:
-                    found = ol.get(query[t], []) + (jobs[t].result() if t in jobs else [])
+                    found = [
+                        c for c in ol.get(query[t], []) + (jobs[t].result() if t in jobs else []) if not derivative(c)
+                    ]
                     st = state[t]
                     st.queries.append(query[t])
-                    st.cands += [c for c in found if not derivative(c)]
-                    found_now += [c for c in found if not derivative(c)]
-                    if st.cands and max(score(t, c)[0] for c in st.cands) >= accept:
+                    st.cands += found
+                    found_now += found
+                    st.best = max([st.best, *(score(t, c)[0] for c in found)])
+                    if st.best >= accept:
                         open_.discard(t)
                 self.pool += found_now
                 k += 1

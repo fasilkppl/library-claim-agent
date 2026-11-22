@@ -39,7 +39,7 @@ from claimagent.pipeline.analyze import FrameAnalyzer
 from claimagent.pipeline.http import CachedHttp
 from claimagent.pipeline.price.sources import COUNTRY_CURRENCY
 from claimagent.pipeline.register import Registrar
-from claimagent.pipeline.resolve import Resolver
+from claimagent.pipeline.resolve import POOL_STAGE, Resolver, pool_to_json
 from claimagent.pipeline.stages import CATEGORY, consensus_text, is_keyframe
 
 log = logging.getLogger(__name__)
@@ -90,7 +90,15 @@ def sweep_reply(text: str, reminder: str) -> str:
     return "Okay."
 
 
-LIVE_LOOKUPS_MAX = 30  # live title lookups per sweep (2 catalogue queries each); the packet looks up the rest
+# Title lookups during the walk: a spine's text once the camera has moved on from it (its track not extended for
+# SETTLED_FRAMES analysed frames), gathered for LIVE_BATCH_WAIT_S and sent together in batched rounds. The records
+# they find are kept (POOL_STAGE): after the sweep, a spine one of them explains needs no lookup of its own.
+LIVE_LOOKUPS_MAX = 150  # texts per sweep (Google Books' daily quota is shared by all sweeps)
+LIVE_GOOGLE_QUERIES = 2  # Google Books queries per text during the walk; the packet's lookups do the rest
+LIVE_ROUNDS = 2  # query rounds during the walk: scoring more rounds took CPU from the live frame analysis
+LIVE_BATCH_WAIT_S = 3.0
+SETTLED_FRAMES = 3
+LOOKUPS_PER_TRACK = 2  # a track whose text grew after its first lookup is looked up once more
 MIC_LOG_S = 5.0  # microphone diagnostics in debug.log this often
 # Longest the frame worker waits for a voice turn: longer waits leave frames to analyse after the sweep.
 VOICE_YIELD_S = 2.0
@@ -166,7 +174,9 @@ class LiveSession:
         self.prev_thumb: np.ndarray | None = None
         self.prev_key_t = 0
         self.titles: dict[str, tuple[str, float]] = {}
-        self.resolving: set[str] = set()
+        self.lookup_q: queue.Queue[str | None] = queue.Queue()
+        self.lookup_worker: threading.Thread | None = None
+        self.queued: dict[int, list[str]] = {}  # track id -> texts sent for lookup
         self.http = CachedHttp(self.store.cache_dir)
         self.resolver = Resolver(self.http, self.s.google_books_key)
         self.voice_metrics: dict[str, list[float]] = {
@@ -294,6 +304,8 @@ class LiveSession:
         self.analyzer = FrameAnalyzer(self.store, self.shared.analyzer_models)
         self.worker = threading.Thread(target=self._frame_worker, daemon=True)
         self.worker.start()
+        self.lookup_worker = threading.Thread(target=self._lookup_worker, daemon=True)
+        self.lookup_worker.start()
         # The question stands alone, so the policyholder can answer it; the sweep is explained after the answer.
         greet = (
             f"Hi, I'm your contents claim assistant. It looks like you're in {COUNTRY_NAMES.get(cc, cc)}, "
@@ -738,19 +750,13 @@ class LiveSession:
 
     def _push_inventory(self) -> None:
         books = []
+        order = {m.seq: k for k, m in enumerate(self.metas)}
         for t in self.registrar.tracks:
             text = self._track_text(t)
-            title = ""
-            if text:
-                if text in self.titles:
-                    title = self.titles[text][0]
-                elif (
-                    text not in self.resolving
-                    and len(re.sub(r"[^A-Za-z]", "", text)) >= 5
-                    and len(self.resolving) < LIVE_LOOKUPS_MAX  # the catalogue's daily quota is shared by all sweeps
-                ):
-                    self.resolving.add(text)
-                    threading.Thread(target=self._resolve_live, args=(text,), daemon=True).start()
+            title = self.titles.get(text, ("", 0.0))[0] if text else ""
+            if text and self._settled(t, order) and self._wants_lookup(t.id, text):
+                self.queued.setdefault(t.id, []).append(text)
+                self.lookup_q.put(text)
             books.append(
                 {"n": t.id + 1, "unit": t.segment + 1, "text": text[:80], "title": title, "seen": len(t.observations)}
             )
@@ -772,18 +778,64 @@ class LiveSession:
             }
         )
 
-    def _resolve_live(self, text: str) -> None:
-        try:
-            r = self.resolver.resolve(text, self.s.id_accept, live=True)
-            self.titles[text] = (r.title if r.status == "identified" else "", r.confidence)
-        except Exception:
-            self.titles[text] = ("", 0.0)
-            return
-        title = self.titles[text][0]
-        # The agent says what it is logging: a book it has identified (confidently) during the walk.
-        if title and r.confidence >= self.s.id_accept and title.lower() not in self.spoken_titles:
-            self.spoken_titles.add(title.lower())
-            self.coach.hint("logged", f"Logged {spoken_title(title)}.", gap=6.0, per_kind=6.0)
+    def _settled(self, t: Any, order: dict[int, int]) -> bool:
+        """The camera has moved on: the track was not extended in the last SETTLED_FRAMES analysed frames."""
+        last = order.get(t.observations[-1].seq)
+        return last is not None and len(self.metas) - 1 - last >= SETTLED_FRAMES
+
+    def _wants_lookup(self, track: int, text: str) -> bool:
+        sent = self.queued.get(track, [])
+        if text in self.titles or text in sent or len(re.sub(r"[^A-Za-z]", "", text)) < 5:
+            return False
+        if sum(len(v) for v in self.queued.values()) >= LIVE_LOOKUPS_MAX or len(sent) >= LOOKUPS_PER_TRACK:
+            return False
+        # Again only when the text grew by a word or more (the track was seen once more, clearer).
+        return not sent or len(text.split()) > len(sent[-1].split())
+
+    def _lookup_worker(self) -> None:
+        stop = False
+        while not stop:
+            first = self.lookup_q.get()
+            if first is None:
+                return
+            batch, until = [first], time.monotonic() + LIVE_BATCH_WAIT_S
+            while len(batch) < 16 and (left := until - time.monotonic()) > 0:
+                try:
+                    nxt = self.lookup_q.get(timeout=left)
+                except queue.Empty:
+                    break
+                if nxt is None:
+                    stop = True
+                    break
+                batch.append(nxt)
+            try:
+                found = self.resolver.resolve_many(
+                    batch, self.s.id_review, self.s.id_accept, LIVE_GOOGLE_QUERIES, LIVE_ROUNDS
+                )
+            except Exception:
+                log.exception("live title lookups failed")
+                continue
+            for text, r in found.items():
+                title = r.title if r.status == "identified" else ""
+                self.titles[text] = (title, r.confidence)
+                # The agent says what it is logging: a book it has identified (confidently) during the walk.
+                if title and r.confidence >= self.s.id_accept and title.lower() not in self.spoken_titles:
+                    self.spoken_titles.add(title.lower())
+                    self.coach.hint("logged", f"Logged {spoken_title(title)}.", gap=6.0, per_kind=6.0)
+            log.info(
+                "live lookups: %s texts, %s named; pool %s records",
+                len(batch),
+                sum(1 for r in found.values() if r.status == "identified"),
+                len(self.resolver.pool),
+            )
+
+    def _stop_lookups(self) -> None:
+        """At the end of the walk: no new round starts, the worker ends, and the records found are kept."""
+        self.resolver.deadline = time.monotonic()
+        self.lookup_q.put(None)
+        if self.lookup_worker:
+            self.lookup_worker.join(15)
+        self.store.write_stage(POOL_STAGE, pool_to_json(self.resolver.pool))
 
     # ------------------------------------------------------------------ end
     async def end_sweep(self) -> None:
@@ -813,6 +865,7 @@ class LiveSession:
                 waited += 10
                 if waited % 60 == 0 and self.worker.is_alive():
                     log.info("live frame worker still finishing after %s s", waited)
+        await asyncio.to_thread(self._stop_lookups)
         t0 = time.monotonic()
 
         def progress(kind: str, data: dict[str, Any]) -> None:

@@ -29,7 +29,7 @@ from claimagent.pipeline.price.sources import (
     SerpApiShopping,
     SerperShopping,
 )
-from claimagent.pipeline.resolve import Resolver
+from claimagent.pipeline.resolve import POOL_STAGE, Resolver, pool_from_json
 from claimagent.pipeline.verify import verify_books
 from claimagent.report.pdf import html_to_pdf
 from claimagent.report.render import render_report
@@ -113,6 +113,9 @@ def run_pipeline(
     s = s or get_settings()
     http = CachedHttp(store.cache_dir, offline=offline)
     resolver = Resolver(http, s.google_books_key)
+    if store.has_stage(POOL_STAGE):
+        # Catalogue records found while the policyholder walked: spines they explain need no lookup now.
+        resolver.pool = pool_from_json(store.read_stage(POOL_STAGE))
     engine = build_engine(http, s)
     timings: dict[str, float] = {}
     t_all = time.perf_counter()
