@@ -1,4 +1,4 @@
-.PHONY: setup models run phone check test test-slow lint types eval reprice marker submission
+.PHONY: setup models run phone check test test-slow lint types eval reprice marker submission ar-check ar-sweep
 
 setup:            ## install Python deps (uv) and browser for the E2E test
 	uv sync
@@ -36,6 +36,12 @@ submission:       ## make submission SWEEP=<id> TRUTH=ground_truth/mine: packet 
 
 reprice:          ## make reprice SWEEP=<id> COUNTRY=US
 	uv run python -m claimagent.pipeline reprice --sweep $(SWEEP) --country $(COUNTRY) -n 10
+
+ar-check:         ## make ar-check LABEL=native SECONDS=45: record ARCore's log while an AR app runs (phone on USB)
+	uv run python scripts/ar_check.py record $(LABEL) $(SECONDS)
+
+ar-sweep:         ## make ar-sweep SWEEP=<id>: AR tracking segments, trust and depth of a sweep
+	uv run python scripts/ar_check.py sweep $(SWEEP)
 
 marker:
 	uv run python scripts/make_marker.py
